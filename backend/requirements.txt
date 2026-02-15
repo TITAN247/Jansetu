@@ -1,0 +1,16 @@
+flask
+flask-cors
+pymongo
+python-dotenv
+scikit-learn
+torch
+numpy
+pandas
+pillow
+requests
+ultralytics
+opencv-python-headless
+pyjwt
+deep-translator
+indic-transliteration
+langdetect
