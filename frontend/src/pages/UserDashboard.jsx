@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { getUserComplaints, submitFeedback } from '../services/api';
+import { getUserComplaints, getComplaintsByEmail, submitFeedback, reopenComplaint } from '../services/api';
 import { Link, useNavigate } from 'react-router-dom';
 import StatusTracker from '../components/StatusTracker';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -8,69 +8,58 @@ const UserDashboard = () => {
     const navigate = useNavigate();
     const [complaints, setComplaints] = useState([]);
     const [loading, setLoading] = useState(true);
-    const [selectedComplaint, setSelectedComplaint] = useState(null); // For Modal
+    const [selectedComplaint, setSelectedComplaint] = useState(null);
     const [feedbackRating, setFeedbackRating] = useState(5);
     const [feedbackComment, setFeedbackComment] = useState('');
+    const [appealReason, setAppealReason] = useState('');
+    const [appealLoading, setAppealLoading] = useState(false);
+    const [showAppealForm, setShowAppealForm] = useState(false);
 
-    // Safe User Retrieval
     const getUser = () => {
-        try {
-            const stored = localStorage.getItem('user');
-            return stored ? JSON.parse(stored) : null;
-        } catch (e) {
-            return null;
-        }
+        try { const s = localStorage.getItem('user'); return s ? JSON.parse(s) : null; }
+        catch { return null; }
     };
-
     const user = getUser();
     const userId = user?.id || user?._id;
-
-    // Redirect if no user (should be handled by ProtectedRoute, but double safety)
-    if (!user || !userId) {
-        window.location.href = '/login';
-        return null;
-    }
+    if (!user || !userId) { window.location.href = '/login'; return null; }
 
     const fetchComplaints = async () => {
         try {
-            const data = await getUserComplaints(userId);
-            // Verify data is an array before setting state
-            if (Array.isArray(data)) {
-                setComplaints(data.slice().reverse()); // Create copy before reversing to avoid mutating constant refs if any
-            } else {
-                console.error("Expected array but got:", data);
-                setComplaints([]);
+            // Fetch by user ID
+            const byId = await getUserComplaints(userId);
+            const idList = Array.isArray(byId) ? byId : [];
+
+            // Also fetch by email (catches pre-registration guest complaints)
+            let merged = [...idList];
+            if (user.email) {
+                try {
+                    const byEmail = await getComplaintsByEmail(user.email);
+                    if (Array.isArray(byEmail)) {
+                        const existingIds = new Set(idList.map(c => c._id));
+                        const newOnes = byEmail.filter(c => !existingIds.has(c._id));
+                        merged = [...merged, ...newOnes];
+                    }
+                } catch { /* email fetch failed, use ID results only */ }
             }
-        } catch (error) {
-            console.error("Error fetching complaints:", error);
-            setComplaints([]);
-        } finally {
-            setLoading(false);
-        }
+
+            setComplaints(merged.slice().reverse());
+        } catch { setComplaints([]); }
+        finally { setLoading(false); }
     };
 
-    useEffect(() => {
-        fetchComplaints();
-    }, []);
+    useEffect(() => { fetchComplaints(); }, []);
 
     const handleFeedbackSubmit = async (e) => {
         e.preventDefault();
         if (!selectedComplaint) return;
         try {
-            await submitFeedback({
-                complaint_id: selectedComplaint._id,
-                rating: feedbackRating,
-                comment: feedbackComment
-            });
-            alert('Feedback submitted successfully!');
-            fetchComplaints(); // Refresh to update local state
-            setSelectedComplaint(null); // Close modal
-        } catch (error) {
-            alert('Failed to submit feedback.');
-        }
+            await submitFeedback({ complaint_id: selectedComplaint._id, rating: feedbackRating, comment: feedbackComment });
+            alert('Feedback submitted!');
+            fetchComplaints();
+            setSelectedComplaint(null);
+        } catch { alert('Failed to submit feedback.'); }
     };
 
-    // Stats Calculation
     const stats = {
         total: complaints.length,
         pending: complaints.filter(c => c.status !== 'Resolved' && c.status !== 'Verified').length,
@@ -78,260 +67,340 @@ const UserDashboard = () => {
         verified: complaints.filter(c => c.status === 'Verified').length
     };
 
-    const getStatusColor = (status) => {
-        switch (status) {
-            case 'Submitted': return 'bg-gray-100 text-gray-800 border-gray-200';
-            case 'Assigned': return 'bg-blue-50 text-blue-800 border-blue-200';
-            case 'In Progress': return 'bg-orange-50 text-orange-800 border-orange-200';
-            case 'Resolved': return 'bg-green-50 text-green-800 border-green-200';
-            case 'Verified': return 'bg-teal-50 text-teal-800 border-teal-200';
-            default: return 'bg-gray-100 text-gray-800 border-gray-200';
+    const handleAppealSubmit = async () => {
+        if (!selectedComplaint || !appealReason.trim()) return;
+        setAppealLoading(true);
+        try {
+            await reopenComplaint(selectedComplaint._id, appealReason);
+            alert('Complaint reopened successfully! It will be reassigned for re-investigation.');
+            setShowAppealForm(false);
+            setAppealReason('');
+            setSelectedComplaint(null);
+            fetchComplaints();
+        } catch (err) {
+            alert(err.response?.data?.error || 'Failed to reopen complaint.');
+        } finally {
+            setAppealLoading(false);
         }
     };
 
+    const statusPillStyle = (status) => {
+        const map = {
+            'Submitted': { bg: '#f0f2f5', color: '#4A5B7A' },
+            'Assigned': { bg: '#eaf2ff', color: '#2B6BFF' },
+            'In Progress': { bg: '#fff7ed', color: '#e67e22' },
+            'Resolved': { bg: '#e6f4ea', color: '#2ecc71' },
+            'Verified': { bg: '#e0f7fa', color: '#00838f' },
+            'Reopened': { bg: '#fff3e0', color: '#ff6f00' }
+        };
+        const m = map[status] || map['Submitted'];
+        return { background: m.bg, color: m.color, border: 'none', padding: '4px 12px', borderRadius: 20, fontSize: 11, fontWeight: 700 };
+    };
+
     return (
-        <div className="min-h-screen bg-[#f3f4f6] pb-12 font-sans">
-
-            {/* --- SECTION 1: HEADER --- */}
-            <header className="bg-[#001f3f] shadow-lg sticky top-0 z-30 border-b-4 border-yellow-500">
-                <div className="max-w-7xl mx-auto py-4 px-4 sm:px-6 lg:px-8 flex justify-between items-center">
-                    <div className="flex items-center gap-4">
-                        <img
-                            src="https://upload.wikimedia.org/wikipedia/commons/5/55/Emblem_of_India.svg"
-                            alt="Emblem"
-                            className="h-10 invert brightness-0 filter"
-                        />
-                        <div>
-                            <h1 className="text-xl md:text-2xl font-serif font-bold text-white tracking-wide">JanSetu Dashboard</h1>
-                            <p className="text-[10px] md:text-xs text-blue-200 uppercase tracking-wider">Citizen Grievance Portal</p>
-                        </div>
+        <div className="page-bg" style={{ minHeight: '100vh', paddingBottom: 80 }}>
+            {/* Dashboard Header */}
+            <section style={{
+                background: 'var(--bg-secondary)', padding: '32px 0 24px',
+                borderBottom: '1px solid var(--border-light)'
+            }}>
+                <div className="container-js" style={{
+                    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                    flexWrap: 'wrap', gap: 16
+                }}>
+                    <div>
+                        <h1 style={{ fontSize: 24, marginBottom: 4 }}>
+                            Welcome, <span style={{ color: 'var(--accent)' }}>{user?.name || 'Citizen'}</span>
+                        </h1>
+                        <p style={{ fontSize: 14, margin: 0 }}>Citizen Dashboard</p>
                     </div>
-
-
-
-
-
-
-                    <button
-                        onClick={() => navigate('/register-complaint')}
-                        className="bg-orange-600 text-white px-5 py-2 rounded-sm hover:bg-orange-700 transition shadow-md font-bold text-sm uppercase tracking-wider border border-orange-700 active:scale-[0.98]"
-                    >
+                    <button className="btn-primary" onClick={() => navigate('/register-complaint')}>
                         + New Complaint
                     </button>
-                    {/* User Profile Hook */}
-                    <div className="hidden md:flex items-center gap-3 ml-6 border-l border-blue-800 pl-6">
-                        <div className="text-right">
-                            <p className="text-xs font-bold text-white">{user?.name || 'Citizen'}</p>
-                            <p className="text-[10px] text-blue-300">Citizen ID: {userId ? userId.slice(-6).toUpperCase() : 'N/A'}</p>
-                        </div>
-                        <div className="h-8 w-8 bg-blue-800 rounded-full flex items-center justify-center text-xs font-bold text-white border border-blue-600">
-                            {user?.name ? user.name.charAt(0) : 'U'}
-                        </div>
-                    </div>
                 </div>
-            </header>
+            </section>
 
-            <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-
-                {/* --- SECTION 2: QUICK STATS --- */}
-                <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+            <div className="container-js" style={{ paddingTop: 32 }}>
+                {/* Stats */}
+                <div style={{
+                    display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))',
+                    gap: 16, marginBottom: 32
+                }}>
                     {[
-                        { label: 'Total Complaints', value: stats.total, color: 'border-l-4 border-blue-900 bg-white text-blue-900' },
-                        { label: 'Pending Action', value: stats.pending, color: 'border-l-4 border-orange-600 bg-white text-orange-800' },
-                        { label: 'Resolved', value: stats.resolved, color: 'border-l-4 border-green-600 bg-white text-green-800' },
-                        { label: 'Verified by AI', value: stats.verified, color: 'border-l-4 border-teal-600 bg-white text-teal-800' }
-                    ].map((stat) => (
-                        <motion.div
-                            key={stat.label}
-                            initial={{ scale: 0.95, opacity: 0 }}
-                            animate={{ scale: 1, opacity: 1 }}
-                            className={`p-6 rounded-sm shadow-sm hover:shadow-md transition-shadow ${stat.color}`}
-                        >
-                            <p className="text-xs font-bold opacity-70 uppercase tracking-widest">{stat.label}</p>
-                            <p className="text-3xl font-serif font-extrabold mt-2">{stat.value}</p>
+                        { label: 'Total', value: stats.total, icon: '📋', color: 'var(--accent)' },
+                        { label: 'Pending', value: stats.pending, icon: '⏳', color: '#e67e22' },
+                        { label: 'Resolved', value: stats.resolved, icon: '✅', color: 'var(--color-success)' },
+                        { label: 'AI Verified', value: stats.verified, icon: '🤖', color: '#00838f' }
+                    ].map((stat, i) => (
+                        <motion.div key={i} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
+                            transition={{ delay: i * 0.08 }} className="card-js" style={{ padding: 24 }}>
+                            <div style={{ fontSize: 24, marginBottom: 8 }}>{stat.icon}</div>
+                            <div style={{ fontSize: 28, fontWeight: 700, fontFamily: 'var(--font-heading)', color: stat.color }}>{stat.value}</div>
+                            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>{stat.label}</div>
                         </motion.div>
                     ))}
                 </div>
 
-                {/* --- SECTION 3: COMPLAINT LIST --- */}
-                <div className="flex justify-between items-end mb-4 border-b border-gray-200 pb-2">
-                    <h2 className="text-lg font-serif font-bold text-[#001f3f] flex items-center gap-2">
-                        <span className="text-orange-600">YOUR</span> GRIEVANCES
-                    </h2>
-                </div>
+                {/* Complaint List */}
+                <h2 style={{ fontSize: 20, marginBottom: 20 }}>Your Complaints</h2>
 
                 {loading ? (
-                    <div className="text-center py-12 text-gray-500 font-medium">Fetching Records...</div>
+                    <div style={{ textAlign: 'center', padding: 60, color: 'var(--text-secondary)' }}>Loading...</div>
                 ) : complaints.length === 0 ? (
-                    <div className="text-center py-20 bg-white rounded-sm shadow-sm border border-dashed border-gray-300">
-                        <div className="text-6xl mb-4 opacity-50">📂</div>
-                        <h3 className="text-xl font-serif font-bold text-[#001f3f]">No Records Found</h3>
-                        <p className="text-gray-500 mt-2 text-sm">You have not submitted any grievances yet.</p>
-                        <button
-                            onClick={() => setShowNewComplaintModal(true)}
-                            className="mt-6 text-blue-900 font-bold hover:underline uppercase text-xs tracking-wider"
-                        >
-                            Register your first complaint
+                    <div className="card-js" style={{ padding: 60, textAlign: 'center' }}>
+                        <div style={{ fontSize: 48, marginBottom: 16, opacity: 0.4 }}>📂</div>
+                        <h3 style={{ fontSize: 18, marginBottom: 8 }}>No complaints yet</h3>
+                        <p style={{ marginBottom: 24 }}>You haven't submitted any grievances.</p>
+                        <button className="btn-primary" onClick={() => navigate('/register-complaint')}>
+                            Submit Your First Complaint
                         </button>
                     </div>
                 ) : (
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                        {complaints.map((complaint, index) => (
-                            <motion.div
-                                key={complaint._id}
-                                initial={{ opacity: 0, y: 20 }}
-                                animate={{ opacity: 1, y: 0 }}
-                                transition={{ delay: index * 0.1 }}
-                                className="bg-white rounded-sm shadow-sm hover:shadow-lg transition-all border-t-4 border-blue-900 overflow-hidden flex flex-col group"
+                    <div style={{
+                        display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 20
+                    }}>
+                        {complaints.map((c, i) => (
+                            <motion.div key={c._id} initial={{ opacity: 0, y: 15 }} animate={{ opacity: 1, y: 0 }}
+                                transition={{ delay: i * 0.06 }} className="card-js"
+                                style={{
+                                    padding: 0, overflow: 'hidden', cursor: 'pointer',
+                                    transition: 'transform 0.2s, box-shadow 0.2s'
+                                }}
+                                onClick={() => setSelectedComplaint(c)}
+                                onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = 'var(--shadow-card-hover)'; }}
+                                onMouseLeave={e => { e.currentTarget.style.transform = ''; e.currentTarget.style.boxShadow = ''; }}
                             >
-                                <div className="p-5 flex-1">
-                                    <div className="flex justify-between items-start mb-4">
-                                        <span className={`px-2 py-0.5 rounded-sm text-[10px] uppercase font-bold tracking-wider border ${getStatusColor(complaint.status)}`}>
-                                            {complaint.status}
-                                        </span>
-                                        <span className="text-[10px] font-mono text-gray-400">
-                                            {new Date(complaint.created_at).toLocaleDateString()}
+                                <div style={{ padding: '20px 24px' }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                                        <span style={statusPillStyle(c.status)}>{c.status}</span>
+                                        <span style={{ fontSize: 11, color: 'var(--text-secondary)', fontWeight: 500 }}>
+                                            {new Date(c.created_at).toLocaleDateString()}
                                         </span>
                                     </div>
-
-                                    <h3 className="font-serif font-bold text-lg text-[#001f3f] mb-2 line-clamp-1 group-hover:text-blue-700 transition-colors">
-                                        {complaint.category} Issue
+                                    <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 8, lineHeight: 1.3 }}>
+                                        {c.category} Issue
                                     </h3>
-                                    <p className="text-sm text-gray-600 line-clamp-2 mb-4 h-10 border-l-2 border-gray-100 pl-3">
-                                        {complaint.text}
-                                    </p>
-
-                                    <div className="flex items-center gap-2 text-[10px] font-bold text-gray-500 uppercase">
-                                        <span className="bg-gray-50 px-2 py-1 rounded-sm border border-gray-200">Priority: {complaint.priority}</span>
-                                        <span className="bg-gray-50 px-2 py-1 rounded-sm border border-gray-200">Dept: {complaint.department}</span>
-                                    </div>
+                                    <p style={{
+                                        fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.5,
+                                        overflow: 'hidden', textOverflow: 'ellipsis', display: '-webkit-box',
+                                        WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', margin: 0
+                                    }}>{c.text}</p>
                                 </div>
-                                <div className="bg-gray-50 px-5 py-3 border-t border-gray-100 flex justify-end">
-                                    <button
-                                        onClick={() => setSelectedComplaint(complaint)}
-                                        className="text-blue-900 font-bold text-xs uppercase tracking-wider hover:text-orange-600 transition flex items-center gap-1"
-                                    >
-                                        View Details <span className="text-lg">›</span>
-                                    </button>
+                                <div style={{
+                                    padding: '12px 24px', borderTop: '1px solid var(--border-light)',
+                                    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                                    background: 'var(--bg-primary)'
+                                }}>
+                                    <div style={{ display: 'flex', gap: 8 }}>
+                                        <span className="pill-js" style={{ fontSize: 10, height: 24, padding: '0 10px' }}>{c.priority}</span>
+                                        <span className="pill-js" style={{ fontSize: 10, height: 24, padding: '0 10px' }}>{c.department}</span>
+                                    </div>
+                                    <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--accent)' }}>View →</span>
                                 </div>
                             </motion.div>
                         ))}
                     </div>
                 )}
-            </main>
+            </div>
 
-            {/* --- SECTION 4: MODALS --- */}
+            {/* Detail Modal */}
             <AnimatePresence>
-                {/* DETAIL MODAL */}
                 {selectedComplaint && (
                     <motion.div
                         initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-                        className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
                         onClick={() => setSelectedComplaint(null)}
+                        style={{
+                            position: 'fixed', inset: 0, zIndex: 100, display: 'flex',
+                            alignItems: 'center', justifyContent: 'center',
+                            background: 'rgba(14,26,51,0.5)', backdropFilter: 'blur(6px)', padding: 20
+                        }}
                     >
                         <motion.div
                             initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.95, opacity: 0 }}
-                            className="bg-white rounded-sm w-full max-w-4xl max-h-[90vh] overflow-y-auto shadow-2xl border-t-8 border-[#001f3f]"
-                            onClick={(e) => e.stopPropagation()}
+                            onClick={e => e.stopPropagation()}
+                            className="card-js"
+                            style={{
+                                width: '100%', maxWidth: 720, maxHeight: '90vh', overflowY: 'auto',
+                                padding: 0, borderRadius: 24
+                            }}
                         >
-                            <div className="p-6 border-b border-gray-100 flex justify-between items-center sticky top-0 bg-white z-10 shadow-sm">
+                            {/* Modal Header */}
+                            <div style={{
+                                padding: '20px 28px', display: 'flex', justifyContent: 'space-between',
+                                alignItems: 'center', borderBottom: '1px solid var(--border-light)',
+                                position: 'sticky', top: 0, background: 'white', zIndex: 2, borderRadius: '24px 24px 0 0'
+                            }}>
                                 <div>
-                                    <h2 className="text-xl font-serif font-bold text-[#001f3f]">Grievance Details</h2>
-                                    <p className="text-xs text-gray-500 font-mono">ID: {selectedComplaint._id}</p>
+                                    <h2 style={{ fontSize: 20, fontWeight: 600, marginBottom: 2 }}>Complaint Details</h2>
+                                    <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>ID: {selectedComplaint._id}</span>
                                 </div>
-                                <button onClick={() => setSelectedComplaint(null)} className="text-gray-400 hover:text-red-600 font-bold text-2xl transition-colors">×</button>
+                                <button onClick={() => setSelectedComplaint(null)} style={{
+                                    width: 36, height: 36, borderRadius: '50%', border: 'none',
+                                    background: 'var(--bg-secondary)', cursor: 'pointer', fontSize: 18,
+                                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                    color: 'var(--text-secondary)', transition: 'all 0.2s'
+                                }}>✕</button>
                             </div>
 
-                            <div className="p-8 space-y-8 bg-gray-50/50">
-                                {/* Timeline */}
-                                <div className="bg-white p-6 rounded-sm shadow-sm border border-gray-100">
-                                    <h3 className="text-xs font-bold text-gray-500 uppercase tracking-widest mb-6 border-b pb-2">Application Status</h3>
+                            <div style={{ padding: 28 }}>
+                                {/* Status Tracker */}
+                                <div style={{
+                                    padding: 20, background: 'var(--bg-secondary)', borderRadius: 16, marginBottom: 24
+                                }}>
                                     <StatusTracker status={selectedComplaint.status} />
                                 </div>
 
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                                    {/* Info */}
-                                    <div className="space-y-6">
-                                        <div className="bg-white p-6 rounded-sm shadow-sm border border-gray-100">
-                                            <h3 className="text-xs font-bold text-gray-500 uppercase tracking-widest mb-4">Grievance Information</h3>
-
-                                            <div className="space-y-4">
-                                                <div>
-                                                    <label className="text-[10px] text-gray-400 font-bold uppercase">Description</label>
-                                                    <p className="text-gray-800 text-sm leading-relaxed mt-1">{selectedComplaint.text}</p>
-                                                </div>
-                                                <div className="grid grid-cols-2 gap-4 pt-2">
-                                                    <div>
-                                                        <label className="text-[10px] text-gray-400 font-bold uppercase">Category</label>
-                                                        <p className="font-bold text-sm text-[#001f3f]">{selectedComplaint.category}</p>
-                                                    </div>
-                                                    <div>
-                                                        <label className="text-[10px] text-gray-400 font-bold uppercase">Department</label>
-                                                        <p className="font-bold text-sm text-[#001f3f]">{selectedComplaint.department}</p>
-                                                    </div>
-                                                </div>
-                                            </div>
+                                {/* Info Grid */}
+                                <div style={{
+                                    display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
+                                    gap: 20, marginBottom: 24
+                                }}>
+                                    <div>
+                                        <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 8 }}>Description</div>
+                                        <p style={{ fontSize: 14, lineHeight: 1.7, margin: 0 }}>{selectedComplaint.text}</p>
+                                        <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+                                            <span className="pill-js" style={{ fontSize: 11 }}>{selectedComplaint.category}</span>
+                                            <span className="pill-js" style={{ fontSize: 11 }}>{selectedComplaint.department}</span>
                                         </div>
                                     </div>
-
-                                    {/* Images */}
-                                    <div className="space-y-4">
-                                        <div className="bg-white p-6 rounded-sm shadow-sm border border-gray-100">
-                                            <h3 className="text-xs font-bold text-gray-500 uppercase tracking-widest mb-4">Evidence Record</h3>
-
-                                            <div className="space-y-4">
-                                                <div>
-                                                    <label className="text-[10px] text-gray-400 font-bold uppercase mb-2 block">Available Evidence (Before)</label>
-                                                    <img src={`http://localhost:5000/uploads/${selectedComplaint.image_before}`} alt="Issue" className="w-full h-48 object-cover rounded-sm border border-gray-200" />
-                                                </div>
-                                                {selectedComplaint.image_after && (
-                                                    <div>
-                                                        <label className="text-[10px] text-green-600 font-bold uppercase mb-2 block">Resolution Proof (After)</label>
-                                                        <img src={`http://localhost:5000/uploads/${selectedComplaint.image_after}`} alt="Resolution" className="w-full h-48 object-cover rounded-sm border-2 border-green-500/30" />
-                                                    </div>
-                                                )}
-                                            </div>
-                                        </div>
+                                    <div>
+                                        <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 8 }}>Evidence</div>
+                                        <img src={`http://localhost:5000/uploads/${selectedComplaint.image_before}`} alt="Before"
+                                            style={{ width: '100%', height: 180, objectFit: 'cover', borderRadius: 12, border: '1px solid var(--border-light)' }} />
+                                        {selectedComplaint.image_after && (
+                                            <img src={`http://localhost:5000/uploads/${selectedComplaint.image_after}`} alt="After"
+                                                style={{ width: '100%', height: 180, objectFit: 'cover', borderRadius: 12, border: '2px solid var(--color-success)', marginTop: 12 }} />
+                                        )}
                                     </div>
                                 </div>
 
-                                {/* SECTION 5: FEEDBACK (Conditional) */}
+                                {/* Feedback */}
                                 {selectedComplaint.status === 'Verified' && !selectedComplaint.feedback && (
-                                    <div className="bg-blue-50 p-8 rounded-sm border-l-4 border-blue-600 shadow-sm">
-                                        <h3 className="font-serif font-bold text-blue-900 text-lg mb-2">Rate Resolution Quality</h3>
-                                        <p className="text-sm text-blue-800 mb-4">Your feedback helps us improve municipal services.</p>
-
+                                    <div style={{
+                                        padding: 24, background: 'var(--bg-secondary)', borderRadius: 16,
+                                        borderLeft: '3px solid var(--accent)'
+                                    }}>
+                                        <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 12 }}>Rate this resolution</h3>
                                         <form onSubmit={handleFeedbackSubmit}>
-                                            <div className="flex gap-2 mb-4 text-3xl">
-                                                {[1, 2, 3, 4, 5].map((star) => (
-                                                    <button
-                                                        type="button"
-                                                        key={star}
-                                                        onClick={() => setFeedbackRating(star)}
-                                                        className={`transition-transform hover:scale-110 ${star <= feedbackRating ? 'text-yellow-500' : 'text-gray-300'}`}
-                                                    >
-                                                        ★
-                                                    </button>
+                                            <div style={{ display: 'flex', gap: 4, marginBottom: 16, fontSize: 28 }}>
+                                                {[1, 2, 3, 4, 5].map(star => (
+                                                    <button type="button" key={star} onClick={() => setFeedbackRating(star)}
+                                                        style={{
+                                                            background: 'none', border: 'none', cursor: 'pointer', fontSize: 28,
+                                                            color: star <= feedbackRating ? '#f1c40f' : '#ddd', transition: 'transform 0.1s'
+                                                        }}
+                                                        onMouseEnter={e => e.currentTarget.style.transform = 'scale(1.2)'}
+                                                        onMouseLeave={e => e.currentTarget.style.transform = ''}>★</button>
                                                 ))}
                                             </div>
-                                            <textarea
-                                                className="w-full p-4 border border-blue-200 rounded-sm mb-4 text-sm focus:ring-1 focus:ring-blue-900 outline-none"
-                                                placeholder="Provide specific feedback on the resolution work..."
-                                                value={feedbackComment}
-                                                onChange={(e) => setFeedbackComment(e.target.value)}
-                                                rows="3"
-                                            />
-                                            <button type="submit" className="bg-blue-900 text-white px-8 py-3 rounded-sm font-bold text-xs uppercase tracking-widest hover:bg-blue-800 shadow-md">Submit Evaluation</button>
+                                            <textarea className="input-js" placeholder="Share your feedback..." value={feedbackComment}
+                                                onChange={e => setFeedbackComment(e.target.value)} rows="3" style={{ marginBottom: 16 }} />
+                                            <button type="submit" className="btn-primary">Submit Feedback</button>
                                         </form>
                                     </div>
                                 )}
 
                                 {selectedComplaint.feedback && (
-                                    <div className="bg-green-50 p-4 rounded-sm border border-green-200 text-green-800 text-sm flex items-center gap-3">
-                                        <span className="text-2xl">✓</span>
+                                    <div style={{
+                                        padding: '16px 20px', background: '#e6f4ea', borderRadius: 16,
+                                        display: 'flex', alignItems: 'center', gap: 12, fontSize: 14
+                                    }}>
+                                        <span style={{ fontSize: 24 }}>✅</span>
                                         <div>
-                                            <strong>Feedback Recorded</strong>
-                                            <p className="text-xs opacity-80">You rated this resolution {selectedComplaint.feedback.rating}/5 stars.</p>
+                                            <strong>Feedback recorded</strong>
+                                            <p style={{ fontSize: 12, margin: 0, opacity: 0.8 }}>Rated {selectedComplaint.feedback.rating}/5 stars</p>
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* Reopen / Appeal Section */}
+                                {(selectedComplaint.status === 'Resolved' || selectedComplaint.status === 'Verified') && (
+                                    <div style={{
+                                        marginTop: 20, padding: 24, background: '#fff8e1', borderRadius: 16,
+                                        borderLeft: '3px solid #ff6f00'
+                                    }}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                                            <h3 style={{ fontSize: 16, fontWeight: 600, color: '#e65100', margin: 0 }}>🔄 Not Satisfied?</h3>
+                                            {selectedComplaint.reopen_count > 0 && (
+                                                <span style={{ fontSize: 11, color: '#bf360c', fontWeight: 600 }}>
+                                                    Appeals used: {selectedComplaint.reopen_count}/3
+                                                </span>
+                                            )}
+                                        </div>
+                                        <p style={{ fontSize: 13, color: '#5d4037', marginBottom: 16, lineHeight: 1.6 }}>
+                                            If you're not satisfied with the resolution, you can reopen this complaint for re-investigation.
+                                        </p>
+                                        {!showAppealForm ? (
+                                            <button onClick={() => setShowAppealForm(true)}
+                                                disabled={(selectedComplaint.reopen_count || 0) >= 3}
+                                                style={{
+                                                    padding: '10px 24px', borderRadius: 12, border: 'none',
+                                                    background: (selectedComplaint.reopen_count || 0) >= 3 ? '#ccc' : 'linear-gradient(135deg, #ff6f00, #ff8f00)',
+                                                    color: 'white', fontWeight: 600, fontSize: 13, cursor: 'pointer',
+                                                    transition: 'all 0.2s'
+                                                }}>
+                                                {(selectedComplaint.reopen_count || 0) >= 3 ? 'Max Appeals Reached' : '⚡ Reopen / Appeal'}
+                                            </button>
+                                        ) : (
+                                            <div>
+                                                <textarea
+                                                    className="input-js"
+                                                    placeholder="Explain why you are not satisfied with the resolution..."
+                                                    value={appealReason}
+                                                    onChange={e => setAppealReason(e.target.value)}
+                                                    rows="3"
+                                                    style={{ marginBottom: 12, width: '100%' }}
+                                                />
+                                                <div style={{ display: 'flex', gap: 10 }}>
+                                                    <button onClick={handleAppealSubmit} disabled={appealLoading || !appealReason.trim()}
+                                                        style={{
+                                                            padding: '10px 24px', borderRadius: 12, border: 'none',
+                                                            background: appealReason.trim() ? '#ff6f00' : '#ccc',
+                                                            color: 'white', fontWeight: 600, fontSize: 13, cursor: 'pointer'
+                                                        }}>
+                                                        {appealLoading ? 'Submitting...' : '📤 Submit Appeal'}
+                                                    </button>
+                                                    <button onClick={() => { setShowAppealForm(false); setAppealReason(''); }}
+                                                        style={{
+                                                            padding: '10px 18px', borderRadius: 12,
+                                                            border: '1px solid var(--border-color)', background: 'transparent',
+                                                            color: 'var(--text-secondary)', fontWeight: 600, fontSize: 13, cursor: 'pointer'
+                                                        }}>Cancel</button>
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {/* Appeal History */}
+                                        {selectedComplaint.appeal_history && selectedComplaint.appeal_history.length > 0 && (
+                                            <div style={{ marginTop: 16, paddingTop: 16, borderTop: '1px solid rgba(0,0,0,0.08)' }}>
+                                                <div style={{ fontSize: 12, fontWeight: 700, color: '#5d4037', marginBottom: 8 }}>APPEAL HISTORY</div>
+                                                {selectedComplaint.appeal_history.map((appeal, idx) => (
+                                                    <div key={idx} style={{
+                                                        padding: '8px 12px', background: '#fff3e0', borderRadius: 8,
+                                                        marginBottom: 6, fontSize: 12
+                                                    }}>
+                                                        <strong>#{idx + 1}:</strong> {appeal.reason}
+                                                        <span style={{ float: 'right', color: '#8d6e63', fontSize: 11 }}>
+                                                            {new Date(appeal.reopened_at).toLocaleDateString()}
+                                                        </span>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+
+                                {/* Reopened Status Banner */}
+                                {selectedComplaint.status === 'Reopened' && (
+                                    <div style={{
+                                        marginTop: 20, padding: '16px 20px', background: '#fff3e0', borderRadius: 16,
+                                        display: 'flex', alignItems: 'center', gap: 12, fontSize: 14,
+                                        border: '1px solid #ffe0b2'
+                                    }}>
+                                        <span style={{ fontSize: 24 }}>🔄</span>
+                                        <div>
+                                            <strong style={{ color: '#e65100' }}>Complaint Reopened</strong>
+                                            <p style={{ fontSize: 12, margin: 0, color: '#795548' }}>Your complaint is being re-investigated.</p>
                                         </div>
                                     </div>
                                 )}
@@ -339,8 +408,6 @@ const UserDashboard = () => {
                         </motion.div>
                     </motion.div>
                 )}
-
-                {/* NEW COMPLAINT MODAL - Removed in favor of redirect */}
             </AnimatePresence>
         </div>
     );

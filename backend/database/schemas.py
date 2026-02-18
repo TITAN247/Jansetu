@@ -28,7 +28,19 @@ def create_worker(name, email, department_id, password_hash, role="Worker", is_a
         "created_at": get_timestamp()
     }
 
-# 3. DEPARTMENT SCHEMA
+# 3. DEPARTMENT OFFICER SCHEMA
+def create_dept_officer(name, email, department_id, password_hash, role="dept_officer", is_active=True):
+    return {
+        "name": name,
+        "email": email,
+        "department_id": department_id,
+        "password_hash": password_hash,
+        "role": role,
+        "is_active": is_active,
+        "created_at": get_timestamp()
+    }
+
+# 4. DEPARTMENT SCHEMA
 def create_department(department_name, issue_types, sla_hours=48):
     return {
         "department_name": department_name,
@@ -39,7 +51,7 @@ def create_department(department_name, issue_types, sla_hours=48):
     }
 
 # 4. COMPLAINT SCHEMA
-def create_complaint(user_id, text, category, priority, department, image_path, ref_id=None, lat=None, lng=None):
+def create_complaint(user_id, text, category, priority, department, image_path, ref_id=None, lat=None, lng=None, email=None):
     """
     Detailed Complaint Schema as per requirements.
     """
@@ -47,6 +59,7 @@ def create_complaint(user_id, text, category, priority, department, image_path, 
     return {
         "user_id": user_id,
         "ref_id": ref_id, # Official ID (e.g., JAN-ROAD-2024-X92A)
+        "email": email,  # Email for guest complaints & notifications
         
         # Complaint Details
         "complaint_text": text,
@@ -74,8 +87,11 @@ def create_complaint(user_id, text, category, priority, department, image_path, 
         },
         
         # Status & Lifecycle
-        "status": "Pending", # Pending -> Verified -> Assigned -> Resolved
+        "status": "Pending", # Pending -> Assigned -> In Progress -> Resolved
         "worker_id": None,
+        "assigned_by": None,  # Dept Officer who assigned
+        "deadline": None,     # Optional deadline set by officer
+        "escalation_level": 0, # 0=normal, 1=escalated to admin
         "timeline": {
             "submitted": timestamp,
             "assigned": None,

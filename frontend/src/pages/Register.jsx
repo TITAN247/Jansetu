@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import { registerUser } from '../services/api';
+import { registerUser, loginUser } from '../services/api';
 import { motion } from 'framer-motion';
 
 const Register = () => {
@@ -14,16 +14,40 @@ const Register = () => {
     const [showPassword, setShowPassword] = useState(false);
     const navigate = useNavigate();
 
+    // Password format validation
+    const passwordChecks = [
+        { label: 'Min 8 characters', test: (p) => p.length >= 8 },
+        { label: 'Uppercase letter', test: (p) => /[A-Z]/.test(p) },
+        { label: 'Lowercase letter', test: (p) => /[a-z]/.test(p) },
+        { label: 'A digit (0-9)', test: (p) => /[0-9]/.test(p) },
+        { label: 'Special character (!@#$%)', test: (p) => /[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/.test(p) },
+    ];
+    const isPasswordValid = passwordChecks.every(c => c.test(password));
+
+    const getDashboardPath = (userRole) => {
+        switch (userRole?.toLowerCase()) {
+            case 'citizen': return '/user-dashboard';
+            case 'worker': return '/worker-dashboard';
+            case 'dept_officer': return '/dept-officer-dashboard';
+            case 'admin': return '/admin-dashboard';
+            case 'governance': return '/governance-dashboard';
+            default: return '/';
+        }
+    };
+
     const handleRegister = async (e) => {
         e.preventDefault();
+        if (!isPasswordValid) {
+            setError('Password does not meet the required format.');
+            return;
+        }
         setIsLoading(true);
         setError('');
-
         try {
             await registerUser({ name, email, password, role, department });
-            // Show success message or redirect
-            // Ideally should show a toast or message before redirecting
-            navigate('/login');
+            // Auto-login after successful registration
+            const loginData = await loginUser(email, password);
+            navigate(getDashboardPath(loginData.user?.role || role));
         } catch (err) {
             setError(err.response?.data?.error || 'Registration failed. Please try again.');
         } finally {
@@ -32,180 +56,142 @@ const Register = () => {
     };
 
     return (
-        <div className="min-h-screen flex flex-col md:flex-row bg-gray-50 font-sans">
-            {/* LEFT SECTION: Branding & Info */}
-            <div className="w-full md:w-1/2 bg-[#001f3f] text-white flex flex-col justify-between p-12 relative overflow-hidden border-r-8 border-yellow-500 order-first md:order-last">
-                <div className="absolute inset-0 opacity-10 bg-[url('https://www.transparenttextures.com/patterns/cubes.png')]"></div>
+        <div className="page-bg" style={{
+            minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center',
+            padding: '40px 20px', position: 'relative', overflow: 'hidden'
+        }}>
+            <div className="blob" style={{ width: 400, height: 400, background: 'var(--bg-secondary)', top: '-10%', left: '-5%' }} />
+            <div className="blob" style={{ width: 300, height: 300, background: 'rgba(43,107,255,0.06)', bottom: '5%', right: '-5%' }} />
 
-                {/* Decorative Elements */}
-                <div className="absolute bottom-0 left-0 w-1/3 h-full bg-[#001730] -skew-x-12 transform -translate-x-20 hidden md:block"></div>
-
-                <motion.div
-                    initial={{ opacity: 0, x: 20 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    transition={{ duration: 0.8 }}
-                    className="z-10 text-center max-w-lg mx-auto flex flex-col h-full justify-center"
-                >
-                    <img
-                        src="https://upload.wikimedia.org/wikipedia/commons/5/55/Emblem_of_India.svg"
-                        alt="National Emblem"
-                        className="h-24 mx-auto mb-6 invert brightness-0 filter"
-                    />
-                    <div className="inline-block px-3 py-1 bg-white/10 border border-white/20 rounded-sm text-yellow-400 text-xs font-bold mb-6 uppercase tracking-widest backdrop-blur-sm self-center">
-                        Unified Registration Portal
-                    </div>
-                    <h1 className="text-4xl md:text-5xl font-serif font-bold tracking-tight mb-4 leading-tight">
-                        Join <span className="text-yellow-500">JanSetu.AI</span>
-                    </h1>
-                    <p className="text-xl font-light text-blue-100 mb-8 tracking-wide">
-                        "Be Part of the Governance Revolution"
-                    </p>
-
-                    <div className="bg-white/5 backdrop-blur-md rounded-sm p-6 border border-white/10 text-left">
-                        <p className="text-sm text-blue-100 leading-relaxed opacity-90 mb-6 italic border-l-2 border-yellow-500 pl-4">
-                            "Create an account to report grievances, track their status, and contribute to a better society. Together, we build a transparent future."
-                        </p>
-                        <ul className="space-y-4 text-blue-50 text-sm">
-                            <li className="flex items-center">
-                                <span className="mr-3 bg-green-600 rounded-full p-1 opacity-100 text-[10px] w-5 h-5 flex items-center justify-center">✓</span>
-                                <span className="font-bold tracking-wide uppercase text-xs">Real-time Complaint Tracking</span>
-                            </li>
-                            <li className="flex items-center">
-                                <span className="mr-3 bg-green-600 rounded-full p-1 opacity-100 text-[10px] w-5 h-5 flex items-center justify-center">✓</span>
-                                <span className="font-bold tracking-wide uppercase text-xs">Direct Official Communication</span>
-                            </li>
-                            <li className="flex items-center">
-                                <span className="mr-3 bg-green-600 rounded-full p-1 opacity-100 text-[10px] w-5 h-5 flex items-center justify-center">✓</span>
-                                <span className="font-bold tracking-wide uppercase text-xs">Secure AI-verify System</span>
-                            </li>
-                        </ul>
-                    </div>
-                </motion.div>
-
-                {/* Footer Info */}
-                <div className="relative z-10 text-center mt-8">
-                    <p className="text-[10px] uppercase tracking-widest text-gray-400">Secure • Transparent • Efficient</p>
+            <motion.div
+                initial={{ opacity: 0, y: 30 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.5 }}
+                style={{ width: '100%', maxWidth: 480, position: 'relative', zIndex: 1 }}
+            >
+                {/* Header */}
+                <div style={{ textAlign: 'center', marginBottom: 32 }}>
+                    <Link to="/" style={{ textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 10, marginBottom: 24 }}>
+                        <div style={{
+                            width: 40, height: 40, borderRadius: '50%', background: 'var(--accent)',
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                            color: 'white', fontFamily: 'var(--font-heading)', fontWeight: 700, fontSize: 16
+                        }}>JS</div>
+                        <span style={{ fontFamily: 'var(--font-heading)', fontWeight: 600, fontSize: 22, color: 'var(--text-primary)' }}>
+                            JanSetu<span style={{ color: 'var(--accent)' }}>AI</span>
+                        </span>
+                    </Link>
+                    <h2 style={{ fontSize: 28, marginBottom: 8 }}>Create your account</h2>
+                    <p style={{ fontSize: 15, color: 'var(--text-secondary)', margin: 0 }}>Join the governance revolution</p>
                 </div>
-            </div>
 
-            {/* RIGHT SECTION: Registration Form */}
-            <div className="w-full md:w-1/2 flex items-center justify-center p-6 md:p-12 bg-white relative">
-                {/* Tricolor Top Strip */}
-                <div className="absolute top-0 left-0 w-full h-1.5 bg-gradient-to-r from-orange-500 via-white to-green-600"></div>
+                {/* Card */}
+                <div className="card-js" style={{ padding: 32 }}>
+                    {error && (
+                        <motion.div
+                            initial={{ opacity: 0, height: 0 }}
+                            animate={{ opacity: 1, height: 'auto' }}
+                            style={{
+                                padding: '12px 16px', borderRadius: 12,
+                                background: '#fef2f2', border: '1px solid #fecaca',
+                                color: 'var(--color-danger)', fontSize: 14, fontWeight: 500, marginBottom: 20
+                            }}
+                        >
+                            {error}
+                        </motion.div>
+                    )}
 
-                {/* Back to Home Button */}
-                <Link to="/" className="absolute top-6 left-6 text-gray-500 hover:text-blue-900 flex items-center gap-2 transition-colors z-40 font-bold text-xs uppercase tracking-wide">
-                    ← Return to Home
-                </Link>
+                    <form onSubmit={handleRegister}>
+                        {/* Role Selector */}
+                        <div style={{ marginBottom: 20 }}>
+                            <label style={{ display: 'block', fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 8 }}>
+                                I am registering as
+                            </label>
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                                {['Citizen', 'Worker', 'dept_officer'].map(r => (
+                                    <button
+                                        key={r}
+                                        type="button"
+                                        onClick={() => setRole(r)}
+                                        style={{
+                                            padding: '12px 16px', borderRadius: 16,
+                                            border: role === r ? '2px solid var(--accent)' : '2px solid var(--border-light)',
+                                            background: role === r ? 'var(--bg-secondary)' : 'var(--surface)',
+                                            color: role === r ? 'var(--accent)' : 'var(--text-secondary)',
+                                            fontWeight: 600, fontSize: 14, cursor: 'pointer',
+                                            fontFamily: 'var(--font-body)',
+                                            transition: 'all 0.2s ease'
+                                        }}
+                                    >
+                                        {r === 'Citizen' ? '👤' : '👷'} {r}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
 
-                <motion.div
-                    initial={{ opacity: 0, scale: 0.95 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    transition={{ duration: 0.5 }}
-                    className="w-full max-w-md space-y-6 z-30"
-                >
-                    <div className="text-center md:text-left border-b-2 border-gray-100 pb-4">
-                        <h2 className="text-3xl font-serif font-bold text-gray-900 text-center">Citizen Registration</h2>
-                        <p className="mt-2 text-sm text-gray-600 text-center font-medium">
-                            Enter your details to create a verified account.
-                        </p>
-                    </div>
+                        <div style={{ marginBottom: 16 }}>
+                            <label style={{ display: 'block', fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 8 }}>Full Name</label>
+                            <input type="text" className="input-js" placeholder="Enter your full name" value={name} onChange={e => setName(e.target.value)} required />
+                        </div>
 
-                    <form className="mt-6 space-y-5" onSubmit={handleRegister}>
-                        {error && (
-                            <motion.div
-                                initial={{ opacity: 0, y: -10 }}
-                                animate={{ opacity: 1, y: 0 }}
-                                className="bg-red-50 border border-red-200 text-red-800 p-3 rounded-sm text-sm font-medium"
+                        <div style={{ marginBottom: 16 }}>
+                            <label style={{ display: 'block', fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 8 }}>Email Address</label>
+                            <input type="email" className="input-js" placeholder="you@example.com" value={email} onChange={e => setEmail(e.target.value)} required />
+                        </div>
+
+                        <div style={{ marginBottom: 8, position: 'relative' }}>
+                            <label style={{ display: 'block', fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 8 }}>Password</label>
+                            <input
+                                type={showPassword ? 'text' : 'password'}
+                                className="input-js"
+                                placeholder="Create a strong password"
+                                value={password}
+                                onChange={e => setPassword(e.target.value)}
+                                required
+                                style={{ paddingRight: 60 }}
+                            />
+                            <button
+                                type="button"
+                                onClick={() => setShowPassword(!showPassword)}
+                                style={{
+                                    position: 'absolute', right: 14, top: 38,
+                                    background: 'none', border: 'none', cursor: 'pointer',
+                                    fontSize: 12, fontWeight: 700, color: 'var(--accent)',
+                                    fontFamily: 'var(--font-body)', textTransform: 'uppercase'
+                                }}
                             >
-                                ⚠️ {error}
-                            </motion.div>
+                                {showPassword ? 'HIDE' : 'SHOW'}
+                            </button>
+                        </div>
+
+                        {/* Password Strength Checklist */}
+                        {password.length > 0 && (
+                            <div style={{
+                                marginBottom: 20, padding: '12px 16px', borderRadius: 12,
+                                background: 'var(--bg-secondary)', border: '1px solid var(--border-light)'
+                            }}>
+                                <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>
+                                    Password Requirements
+                                </div>
+                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px 16px' }}>
+                                    {passwordChecks.map((check, i) => {
+                                        const passed = check.test(password);
+                                        return (
+                                            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: passed ? '#2ecc71' : '#94a3b8', fontWeight: 500, transition: 'color 0.2s' }}>
+                                                <span style={{ fontSize: 10 }}>{passed ? '✅' : '⬜'}</span>
+                                                {check.label}
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </div>
                         )}
 
-                        {/* Role Selector */}
-                        <div>
-                            <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">I am registering as...</label>
-                            <div className="grid grid-cols-2 gap-3">
-                                <button
-                                    type="button"
-                                    onClick={() => setRole('Citizen')}
-                                    className={`flex items-center justify-center px-4 py-3 border-2 rounded-sm text-sm font-bold uppercase tracking-wide transition-colors ${role === 'Citizen'
-                                        ? 'bg-blue-50 border-blue-900 text-blue-900'
-                                        : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'
-                                        }`}
-                                >
-                                    👤 Citizen
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={() => setRole('Worker')}
-                                    className={`flex items-center justify-center px-4 py-3 border-2 rounded-sm text-sm font-bold uppercase tracking-wide transition-colors ${role === 'Worker'
-                                        ? 'bg-blue-50 border-blue-900 text-blue-900'
-                                        : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'
-                                        }`}
-                                >
-                                    👷 Worker
-                                </button>
-                            </div>
-                        </div>
-
-                        <div className="space-y-4">
-                            <div>
-                                <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-1">Full Name</label>
-                                <input
-                                    type="text"
-                                    required
-                                    placeholder="Enter your full name as per ID"
-                                    value={name}
-                                    onChange={(e) => setName(e.target.value)}
-                                    className="block w-full px-4 py-3 bg-gray-50 border border-gray-300 rounded-sm focus:ring-1 focus:ring-blue-900 focus:border-blue-900 text-sm transition-all focus:bg-white"
-                                />
-                            </div>
-
-                            <div>
-                                <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-1">Email Address</label>
-                                <input
-                                    type="email"
-                                    required
-                                    placeholder="name@example.com"
-                                    value={email}
-                                    onChange={(e) => setEmail(e.target.value)}
-                                    className="block w-full px-4 py-3 bg-gray-50 border border-gray-300 rounded-sm focus:ring-1 focus:ring-blue-900 focus:border-blue-900 text-sm transition-all focus:bg-white"
-                                />
-                            </div>
-
-                            <div className="relative">
-                                <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-1">Password</label>
-                                <input
-                                    type={showPassword ? "text" : "password"}
-                                    required
-                                    placeholder="Create a strong password"
-                                    value={password}
-                                    onChange={(e) => setPassword(e.target.value)}
-                                    className="block w-full px-4 py-3 bg-gray-50 border border-gray-300 rounded-sm focus:ring-1 focus:ring-blue-900 focus:border-blue-900 text-sm transition-all focus:bg-white pr-16"
-                                />
-                                <button
-                                    type="button"
-                                    className="absolute inset-y-0 right-0 top-6 px-3 flex items-center text-xs font-bold text-blue-800 uppercase hover:text-blue-600 focus:outline-none"
-                                    onClick={() => setShowPassword(!showPassword)}
-                                >
-                                    {showPassword ? "HIDE" : "SHOW"}
-                                </button>
-                            </div>
-                        </div>
-
-                        {role === 'Worker' && (
-                            <motion.div
-                                initial={{ opacity: 0, height: 0 }}
-                                animate={{ opacity: 1, height: 'auto' }}
-                            >
-                                <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-1">Department</label>
-                                <select
-                                    value={department}
-                                    onChange={(e) => setDepartment(e.target.value)}
-                                    className="block w-full px-4 py-3 bg-gray-50 border border-gray-300 rounded-sm focus:ring-1 focus:ring-blue-900 focus:border-blue-900 text-sm transition-all focus:bg-white"
-                                >
-                                    <option value="">Select Official Department</option>
+                        {(role === 'Worker' || role === 'dept_officer') && (
+                            <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} style={{ marginBottom: 20 }}>
+                                <label style={{ display: 'block', fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 8 }}>Department</label>
+                                <select className="input-js" value={department} onChange={e => setDepartment(e.target.value)}>
+                                    <option value="">Select Department</option>
                                     <option value="Water">Water Supply</option>
                                     <option value="Road">Roads & Transport</option>
                                     <option value="Electricity">Electricity</option>
@@ -214,25 +200,19 @@ const Register = () => {
                             </motion.div>
                         )}
 
-                        <div>
-                            <button
-                                type="submit"
-                                disabled={isLoading}
-                                className={`w-full flex justify-center py-4 px-4 border border-transparent rounded-sm shadow-sm text-sm font-bold text-white bg-blue-900 hover:bg-blue-800 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-900 transition-all duration-200 uppercase tracking-widest active:scale-[0.99] ${isLoading ? 'opacity-70 cursor-not-allowed' : ''}`}
-                            >
-                                {isLoading ? 'Creating Account...' : 'Register Account'}
-                            </button>
-                        </div>
-
-                        <div className="text-center text-sm border-t border-gray-200 pt-4">
-                            <span className="text-gray-600 text-xs">Already have an account? </span>
-                            <Link to="/login" className="font-bold text-blue-900 hover:underline uppercase text-xs tracking-wide">
-                                Sign in here
-                            </Link>
-                        </div>
+                        <button type="submit" className="btn-primary" disabled={isLoading} style={{ width: '100%', opacity: isLoading ? 0.7 : 1 }}>
+                            {isLoading ? 'Creating Account...' : 'Create Account'}
+                        </button>
                     </form>
-                </motion.div>
-            </div>
+
+                    <div style={{ textAlign: 'center', marginTop: 24, paddingTop: 20, borderTop: '1px solid var(--border-light)' }}>
+                        <p style={{ fontSize: 14, color: 'var(--text-secondary)', margin: 0 }}>
+                            Already have an account?{' '}
+                            <Link to="/login" style={{ color: 'var(--accent)', fontWeight: 600, textDecoration: 'none' }}>Sign in</Link>
+                        </p>
+                    </div>
+                </div>
+            </motion.div>
         </div>
     );
 };

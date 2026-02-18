@@ -23,8 +23,15 @@ api.interceptors.request.use(
     }
 );
 
-export const loginUser = async (email, password) => {
-    const response = await api.post('/auth/login', { email, password });
+// context is used to enforce role-wise login on backend:
+// e.g. 'public' for citizen/worker/local authority portal,
+//       'admin_portal' for administration-only portal.
+export const loginUser = async (email, password, context) => {
+    const payload = { email, password };
+    if (context) {
+        payload.context = context;
+    }
+    const response = await api.post('/auth/login', payload);
     if (response.data.token) {
         localStorage.setItem('token', response.data.token);
         localStorage.setItem('user', JSON.stringify(response.data.user));
@@ -81,34 +88,112 @@ export const getAdminStats = async () => {
     return response.data;
 };
 
-export const getAllComplaints = async () => {
-    const response = await api.get('/admin/all');
+export const getAllComplaints = async (params = {}) => {
+    const query = new URLSearchParams(params).toString();
+    const response = await api.get(`/admin/all${query ? '?' + query : ''}`);
     return response.data;
 };
 
 // Governance API
-export const getGovernanceAnalytics = async () => {
-    const response = await api.get('/governance/analytics');
+export const getGovernanceAnalytics = async (district = '') => {
+    const query = district ? `?district=${encodeURIComponent(district)}` : '';
+    const response = await api.get(`/governance/analytics${query}`);
     return response.data;
 };
 
-export const getDeptPerformance = async () => {
-    const response = await api.get('/governance/department-performance');
+export const getDeptPerformance = async (district = '') => {
+    const query = district ? `?district=${encodeURIComponent(district)}` : '';
+    const response = await api.get(`/governance/department-performance${query}`);
     return response.data;
 };
 
-export const getComplaintTrends = async () => {
-    const response = await api.get('/governance/trends');
+export const getComplaintTrends = async (district = '') => {
+    const query = district ? `?district=${encodeURIComponent(district)}` : '';
+    const response = await api.get(`/governance/trends${query}`);
     return response.data;
 };
 
-export const getAIMetrics = async () => {
-    const response = await api.get('/governance/ai-metrics');
+export const getAIMetrics = async (district = '') => {
+    const query = district ? `?district=${encodeURIComponent(district)}` : '';
+    const response = await api.get(`/governance/ai-metrics${query}`);
     return response.data;
 };
 
 export const getComplaintDetails = async (id) => {
     const response = await api.get(`/complaint/${id}`);
+    return response.data;
+};
+
+export const getComplaintsByEmail = async (email) => {
+    const response = await api.get(`/complaint/by-email/${encodeURIComponent(email)}`);
+    return response.data;
+};
+
+// ============ DEPT OFFICER API ============
+export const getDeptOfficerDashboard = async (department) => {
+    const response = await api.get(`/dept-officer/dashboard?department=${department}`);
+    return response.data;
+};
+
+export const getDeptComplaints = async (department) => {
+    const response = await api.get(`/dept-officer/complaints?department=${department}`);
+    return response.data;
+};
+
+export const getDeptWorkers = async (department) => {
+    const response = await api.get(`/dept-officer/workers?department=${department}`);
+    return response.data;
+};
+
+export const assignComplaint = async (complaintId, workerId, officerId, deadline) => {
+    const response = await api.post('/dept-officer/assign', {
+        complaint_id: complaintId, worker_id: workerId, officer_id: officerId, deadline
+    });
+    return response.data;
+};
+
+export const reassignComplaint = async (complaintId, workerId, officerId) => {
+    const response = await api.post('/dept-officer/reassign', {
+        complaint_id: complaintId, worker_id: workerId, officer_id: officerId
+    });
+    return response.data;
+};
+
+// ============ WORKER API (UPDATED) ============
+export const getWorkerAssignedTasks = async (workerId) => {
+    const response = await api.get(`/worker/assigned?worker_id=${workerId}`);
+    return response.data;
+};
+
+export const acceptTask = async (complaintId, workerId) => {
+    const response = await api.post('/worker/accept', {
+        complaint_id: complaintId, worker_id: workerId
+    });
+    return response.data;
+};
+
+// ============ ADMIN INTERVENTION API ============
+export const getEscalatedComplaints = async () => {
+    const response = await api.get('/admin/escalated');
+    return response.data;
+};
+
+export const getDeptOfficers = async () => {
+    const response = await api.get('/admin/dept-officers');
+    return response.data;
+};
+
+export const overrideComplaintStatus = async (complaintId, status, note) => {
+    const response = await api.post('/admin/override-status', {
+        complaint_id: complaintId, status, note
+    });
+    return response.data;
+};
+
+export const adminReassign = async (complaintId, department, workerId, note) => {
+    const response = await api.post('/admin/reassign', {
+        complaint_id: complaintId, department, worker_id: workerId, note
+    });
     return response.data;
 };
 
@@ -122,3 +207,29 @@ export const markNotificationRead = async (id) => {
     const response = await api.post(`/notifications/read/${id}`);
     return response.data;
 };
+
+// ============ REOPEN / APPEAL API ============
+export const reopenComplaint = async (complaintId, reason) => {
+    const response = await api.post('/complaint/reopen', {
+        complaint_id: complaintId, reason
+    });
+    return response.data;
+};
+
+// Smart assignment is now automatic on complaint submission (backend)
+// No frontend API call needed for smart-assign
+
+// ============ ADMIN ACCESS CODE API ============
+export const verifyAdminAccessCode = async (accessCode) => {
+    const response = await api.post('/admin/verify-access-code', {
+        access_code: accessCode
+    });
+    return response.data;
+};
+
+// ============ UP DISTRICTS API ============
+export const getUPDistricts = async () => {
+    const response = await api.get('/admin/up-districts');
+    return response.data;
+};
+

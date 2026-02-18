@@ -14,33 +14,82 @@ worker_bp = Blueprint('worker', __name__)
 def get_assigned_complaints():
     db = get_db()
     department = request.args.get('department')
+    worker_id = request.args.get('worker_id')
     
-    if not department:
-        return jsonify({'error': 'Department parameter required'}), 400
+    if not department and not worker_id:
+        return jsonify({'error': 'department or worker_id parameter required'}), 400
+    
+    query = {}
+    
+    if worker_id:
+        # Worker sees only tasks assigned to them
+        query['worker_id'] = worker_id
+        query['status'] = {'$in': ['Assigned', 'In Progress', 'Resolved', 'Verified']}
+    else:
+        # Fallback: department-based (legacy support)
+        search_depts = [department]
+        if department == 'Road': search_depts.append('Road Department')
+        if department == 'Water': search_depts.append('Water Department')
+        if department == 'Electricity': search_depts.append('Electricity Department')
+        if department == 'Sanitation': search_depts.append('Sanitation Department')
         
-    # Handle Legacy Data Mappings (Road vs Road Department)
-    search_depts = [department]
-    if department == 'Road': search_depts.append('Road Department')
-    if department == 'Water': search_depts.append('Water Department')
-    if department == 'Electricity': search_depts.append('Electricity Department')
-    if department == 'Sanitation': search_depts.append('Sanitation Department')
+        query['department'] = {'$in': search_depts}
+        query['status'] = {'$in': ['Pending', 'Submitted', 'Assigned', 'In Progress', 'Resolved', 'Verified']}
     
-    print(f"[WORKER DASHBOARD] Searching for Departments: {search_depts}")
-
-    query = {
-        'department': {'$in': search_depts},
-        # Include 'Pending' status which is the initial status from schemas.py
-        'status': {'$in': ['Pending', 'Submitted', 'Assigned', 'In Progress', 'Resolved', 'Verified']}
-    }
+    print(f"[WORKER DASHBOARD] Query: {query}")
     
     complaints = list(db.complaints.find(query).sort('created_at', -1))
-    
     print(f"[WORKER DASHBOARD] Found {len(complaints)} complaints")
     
     for c in complaints:
         c['_id'] = str(c['_id'])
         
     return jsonify(complaints), 200
+
+
+@worker_bp.route('/accept', methods=['POST'])
+def accept_task():
+    """Worker accepts an assigned task, changing status to 'In Progress'."""
+    db = get_db()
+    data = request.json
+    
+    complaint_id = data.get('complaint_id')
+    worker_id = data.get('worker_id')
+    
+    if not complaint_id or not worker_id:
+        return jsonify({'error': 'complaint_id and worker_id required'}), 400
+
+    try:
+        complaint = db.complaints.find_one({'_id': ObjectId(complaint_id)})
+    except:
+        return jsonify({'error': 'Invalid complaint ID'}), 400
+    
+    if not complaint:
+        return jsonify({'error': 'Complaint not found'}), 404
+    
+    if complaint.get('worker_id') != worker_id:
+        return jsonify({'error': 'This task is not assigned to you'}), 403
+
+    db.complaints.update_one(
+        {'_id': ObjectId(complaint_id)},
+        {'$set': {
+            'status': 'In Progress',
+            'timeline.in_progress': datetime.datetime.utcnow(),
+            'last_updated': datetime.datetime.utcnow()
+        }}
+    )
+
+    # Email notification
+    if complaint.get('email'):
+        try:
+            from services.email_service import send_status_update
+            send_status_update(complaint['email'], complaint.get('ref_id', ''), 'In Progress',
+                'A field worker has accepted your complaint and is working on resolving it.')
+        except Exception as e:
+            print(f"[ACCEPT] Email error: {e}")
+
+    return jsonify({'message': 'Task accepted', 'status': 'In Progress'}), 200
+
 
 @worker_bp.route('/upload-work', methods=['POST'])
 def upload_work():
@@ -79,7 +128,6 @@ def upload_work():
         
         if not os.path.exists(before_path):
              print(f"[WARNING] Before image not found: {before_path}")
-             # Proceed? Or fail? Verification will handle it (returns Not Verified)
         
         # 5. AI Verification
         print(f"[DEBUG] Verifying {before_path} vs {file_path}")
@@ -91,16 +139,9 @@ def upload_work():
         if worker_remark:
              all_remarks += f"\n[Worker]: {worker_remark}"
         
-        # Determine Status
-        # If Verification Passed -> 'Verified' (Closed)
-        # If Verification Failed -> 'In Progress' (Rejected, requires re-upload)
-        
         is_verified = (verification_result['status'] == 'Verified')
-        # User Request: "verified by ai first then resolved in evry where"
-        # Changing status to 'Resolved' so it shows as fully completed in UI.
         new_status = 'Resolved' if is_verified else 'In Progress'
         
-        # Capture verification failure reason for the worker
         rejection_note = ""
         if not is_verified:
             rejection_note = f"\n[System]: Auto-Rejected by AI. Reason: {verification_result.get('reason', 'Verification Failed')}"
@@ -120,6 +161,7 @@ def upload_work():
         
         if is_verified:
             update_data['resolved_at'] = datetime.datetime.now()
+            update_data['timeline.resolved'] = datetime.datetime.now()
 
         db.complaints.update_one(
             {'_id': ObjectId(complaint_id)},
@@ -128,18 +170,31 @@ def upload_work():
         
         # 7. Notify
         user_id = complaint.get('user_id')
-        ref_id = str(complaint.get('_id'))
+        ref_id = complaint.get('ref_id') or str(complaint.get('_id'))
+        complaint_email = complaint.get('email')
         
         if is_verified:
             msg = f"Complaint {ref_id} Verified & Closed by AI."
-            # Notify Citizen
             try:
                 notification_service.notify_complaint_activity(user_id, ref_id, msg, "resolution")
             except Exception as ne:
                 print(f"Notification Error: {ne}")
+            if complaint_email:
+                try:
+                    from services.email_service import send_status_update
+                    send_status_update(complaint_email, ref_id, 'Resolved',
+                        'Your complaint has been verified by AI and marked as resolved. Thank you for helping improve your community!')
+                except Exception as ee:
+                    print(f"[EMAIL] Status update error: {ee}")
         else:
-            # Notify Worker (Logic to notify worker would go here, but Alert serves as immediate feedback)
             print(f"[AUTO-REJECT] Worker update rejected for {ref_id}")
+            if complaint_email:
+                try:
+                    from services.email_service import send_status_update
+                    send_status_update(complaint_email, ref_id, 'In Progress',
+                        'The submitted work proof did not pass AI verification. A worker will re-attempt the resolution.')
+                except Exception as ee:
+                    print(f"[EMAIL] Status update error: {ee}")
 
         return jsonify({
             'message': 'Work processed',

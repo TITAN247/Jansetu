@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { Link, useNavigate } from 'react-router-dom';
 import { submitComplaint } from '../services/api';
@@ -6,12 +6,33 @@ import { submitComplaint } from '../services/api';
 const RegisterComplaint = () => {
     const navigate = useNavigate();
 
+    // Check if user is logged in
+    let loggedInUser = null;
+    try {
+        const u = localStorage.getItem('user');
+        if (u) loggedInUser = JSON.parse(u);
+    } catch { }
+
+    // Enforce citizen-only access: If logged in as non-citizen, block access
+    useEffect(() => {
+        if (loggedInUser && loggedInUser.role && loggedInUser.role !== 'citizen') {
+            // Non-citizen trying to access complaint registration
+            const roleName = loggedInUser.role === 'worker' ? 'Worker' :
+                loggedInUser.role === 'dept_officer' ? 'Department Officer' :
+                    loggedInUser.role === 'admin' ? 'Administrator' :
+                        loggedInUser.role === 'governance' ? 'Governance Official' : 'Official';
+            alert(`Only citizens can register complaints. You are logged in as a ${roleName}.`);
+            navigate('/');
+        }
+    }, [loggedInUser, navigate]);
+
     // Form State
     const [description, setDescription] = useState('');
     const [image, setImage] = useState(null);
     const [imagePreview, setImagePreview] = useState(null);
     const [isListening, setIsListening] = useState(false);
     const [declaration, setDeclaration] = useState(false);
+    const [email, setEmail] = useState(loggedInUser?.email || '');
 
     // Location State
     const [location, setLocation] = useState(null);
@@ -20,7 +41,11 @@ const RegisterComplaint = () => {
     // Submission State
     const [submissionStatus, setSubmissionStatus] = useState('idle');
     const [complaintId, setComplaintId] = useState(null);
+    const [refId, setRefId] = useState(null);
     const [errorMsg, setErrorMsg] = useState('');
+    const [copied, setCopied] = useState(false);
+    // Duplicate detection state
+    const [duplicateInfo, setDuplicateInfo] = useState(null); // { message, existing_ref_id, existing_status, is_resolved }
 
     // --- LOGIC: Voice Input ---
     const startListening = () => {
@@ -30,7 +55,6 @@ const RegisterComplaint = () => {
             recognition.continuous = false;
             recognition.interimResults = false;
             recognition.lang = 'en-US';
-
             recognition.onstart = () => setIsListening(true);
             recognition.onresult = (event) => {
                 const transcript = event.results[0][0].transcript;
@@ -47,23 +71,14 @@ const RegisterComplaint = () => {
 
     // --- LOGIC: Geolocation ---
     const getLocation = () => {
-        if (!navigator.geolocation) {
-            alert("Geolocation is not supported by your browser.");
-            return;
-        }
+        if (!navigator.geolocation) { alert("Geolocation is not supported."); return; }
         setLocationStatus('loading');
         navigator.geolocation.getCurrentPosition(
             (position) => {
-                setLocation({
-                    lat: position.coords.latitude,
-                    lng: position.coords.longitude
-                });
+                setLocation({ lat: position.coords.latitude, lng: position.coords.longitude });
                 setLocationStatus('success');
             },
-            () => {
-                setLocationStatus('error');
-                alert("Unable to retrieve your location. Please allow access.");
-            }
+            () => { setLocationStatus('error'); alert("Unable to retrieve location."); }
         );
     };
 
@@ -77,275 +92,475 @@ const RegisterComplaint = () => {
         }
     };
 
+    const handleCopy = () => {
+        const textToCopy = refId || complaintId;
+        navigator.clipboard.writeText(textToCopy).then(() => {
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+        });
+    };
+
     const handleSubmit = async (e) => {
         e.preventDefault();
-
         if (!description.trim()) { setErrorMsg("Please provide a description."); return; }
         if (!image) { setErrorMsg("Image evidence is mandatory."); return; }
         if (!location) { setErrorMsg("Location is mandatory."); return; }
         if (!declaration) { setErrorMsg("Please accept the declaration."); return; }
+        // Validate email format if provided
+        if (email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+            setErrorMsg("Please enter a valid email address."); return;
+        }
 
         setSubmissionStatus('loading');
         setErrorMsg('');
 
-        const formData = new FormData();
-        let userId = 'Anonymous';
-        try {
-            const userStr = localStorage.getItem('user');
-            if (userStr) userId = JSON.parse(userStr).id;
-        } catch (e) { }
+        // Final check: Block non-citizens from submitting
+        if (loggedInUser && loggedInUser.role && loggedInUser.role !== 'citizen') {
+            setErrorMsg("Only citizens can register complaints. Please log in as a citizen to submit a complaint.");
+            return;
+        }
 
-        formData.append('user_id', userId);
+        const formData = new FormData();
+        formData.append('user_id', loggedInUser?.id || 'Anonymous');
         formData.append('description', description);
         formData.append('image', image);
-
-        if (location) {
-            formData.append('lat', location.lat);
-            formData.append('lng', location.lng);
-        }
+        if (email.trim()) formData.append('email', email.trim());
+        if (location) { formData.append('lat', location.lat); formData.append('lng', location.lng); }
 
         try {
             const response = await submitComplaint(formData);
             setSubmissionStatus('success');
             setComplaintId(response.complaint_id);
+            setRefId(response.ref_id);
             window.scrollTo(0, 0);
-        } catch (error) {
-            setSubmissionStatus('error');
-            setErrorMsg("Server error. Please try again.");
+        } catch (err) {
+            // 409 = duplicate complaint detected
+            if (err.response?.status === 409 && err.response?.data?.duplicate) {
+                const d = err.response.data;
+                setDuplicateInfo({
+                    message: d.message,
+                    existing_ref_id: d.existing_ref_id,
+                    existing_status: d.existing_status,
+                    is_resolved: d.is_resolved,
+                });
+                setSubmissionStatus('duplicate');
+                window.scrollTo(0, 0);
+            } else {
+                setSubmissionStatus('error');
+                const errorMessage = err.response?.data?.error || err.response?.data?.message || 'Server error. Please try again.';
+                setErrorMsg(errorMessage);
+            }
         }
     };
 
-    if (submissionStatus === 'success') {
+    /* ─── Duplicate Screen ─── */
+    if (submissionStatus === 'duplicate' && duplicateInfo) {
+        const isResolved = duplicateInfo.is_resolved;
         return (
-            <div className="min-h-screen bg-[#001f3f] flex items-center justify-center p-4">
+            <div className="page-bg" style={{
+                minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20
+            }}>
                 <motion.div
                     initial={{ scale: 0.9, opacity: 0 }}
                     animate={{ scale: 1, opacity: 1 }}
-                    className="bg-white max-w-lg w-full p-10 rounded-sm shadow-2xl text-center relative overflow-hidden"
+                    className="card-js"
+                    style={{ maxWidth: 540, width: '100%', padding: 40, textAlign: 'center' }}
                 >
-                    <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-green-500 to-green-700"></div>
-                    <div className="w-24 h-24 bg-green-50 rounded-full flex items-center justify-center mx-auto mb-6 shadow-inner">
-                        <span className="text-5xl">✅</span>
-                    </div>
-                    <h2 className="text-3xl font-serif font-bold text-[#001f3f] mb-2">Submission Successful</h2>
-                    <p className="text-gray-500 mb-8">Your concern has been registered with the municipal authority.</p>
-
-                    <div className="bg-gray-50 p-6 border border-gray-200 rounded-sm mb-8 relative group cursor-pointer hover:bg-white hover:shadow-md transition">
-                        <p className="text-[10px] uppercase font-bold text-gray-400 tracking-widest mb-1">Official Complaint ID</p>
-                        <p className="text-3xl font-mono font-bold text-blue-900 tracking-wider">{complaintId}</p>
+                    {/* Icon */}
+                    <div style={{
+                        width: 80, height: 80, borderRadius: '50%',
+                        background: isResolved ? '#e6f4ea' : '#EAF2FF',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        margin: '0 auto 24px', fontSize: 40
+                    }}>
+                        {isResolved ? '✅' : '📋'}
                     </div>
 
-                    <div className="grid grid-cols-2 gap-4">
-                        <Link to="/track" className="px-6 py-4 bg-[#001f3f] text-white font-bold uppercase tracking-widest rounded-sm hover:bg-blue-900 transition shadow-lg text-xs md:text-sm flex items-center justify-center">
-                            Track Status
-                        </Link>
-                        <Link to="/" className="px-6 py-4 border-2 border-gray-200 text-gray-600 font-bold uppercase tracking-widest rounded-sm hover:bg-gray-50 hover:text-[#001f3f] transition text-xs md:text-sm flex items-center justify-center">
-                            Back Home
-                        </Link>
+                    <h2 style={{ fontSize: 26, marginBottom: 10 }}>
+                        {isResolved ? 'Already Resolved!' : 'Already Registered!'}
+                    </h2>
+
+                    {/* Friendly message */}
+                    <p style={{
+                        fontSize: 15, color: 'var(--text-secondary)', lineHeight: 1.7,
+                        marginBottom: 28, maxWidth: 420, margin: '0 auto 28px'
+                    }}>
+                        {duplicateInfo.message}
+                    </p>
+
+                    {/* Existing complaint card */}
+                    <div style={{
+                        padding: '20px 24px', background: 'var(--bg-secondary)',
+                        borderRadius: 16, marginBottom: 28,
+                        border: `1px solid ${isResolved ? 'rgba(46,204,113,0.2)' : 'rgba(43,107,255,0.15)'}`
+                    }}>
+                        <div style={{ fontSize: 11, color: 'var(--text-secondary)', fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 6 }}>
+                            Existing Complaint
+                        </div>
+                        <div style={{ fontSize: 22, fontWeight: 800, color: 'var(--accent)', marginBottom: 10, wordBreak: 'break-all' }}>
+                            {duplicateInfo.existing_ref_id}
+                        </div>
+                        <span style={{
+                            fontSize: 12, fontWeight: 700, padding: '4px 14px', borderRadius: 20,
+                            background: isResolved ? '#e6f4ea' : '#EAF2FF',
+                            color: isResolved ? '#2ecc71' : 'var(--accent)'
+                        }}>
+                            {duplicateInfo.existing_status}
+                        </span>
+                    </div>
+
+                    <div style={{ display: 'flex', gap: 12, justifyContent: 'center', flexWrap: 'wrap' }}>
+                        <Link to="/track" className="btn-primary">Track Existing Complaint</Link>
+                        <button
+                            onClick={() => { setSubmissionStatus('idle'); setDuplicateInfo(null); }}
+                            className="btn-secondary"
+                        >
+                            Submit Different Issue
+                        </button>
                     </div>
                 </motion.div>
             </div>
         );
     }
 
-    return (
-        <div className="min-h-screen bg-gray-50 font-sans flex flex-col md:flex-row">
+    /* ─── Success Screen ─── */
+    if (submissionStatus === 'success') {
+        const displayId = refId || complaintId;
+        // Adaptive font size based on ID length
+        const idFontSize = displayId.length > 20 ? 18 : displayId.length > 14 ? 22 : 28;
 
-            {/* --- LEFT PANEL: IDENTITY & INFO --- */}
-            <div className="w-full md:w-[40%] bg-[#001f3f] text-white p-8 md:p-12 flex flex-col justify-between relative overflow-hidden">
-                {/* Background Pattern */}
-                <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/cubes.png')] opacity-5 pointer-events-none"></div>
-
-                <div className="relative z-10">
-                    <Link to="/" className="flex items-center gap-3 mb-12 hover:opacity-80 transition">
-                        <img src="https://upload.wikimedia.org/wikipedia/commons/5/55/Emblem_of_India.svg" alt="Emblem" className="h-12 filter brightness-0 invert" />
-                        <div>
-                            <h2 className="text-[10px] uppercase tracking-[0.2em] text-blue-200">Government of India</h2>
-                            <h1 className="text-2xl font-serif font-bold leading-none">JanSetu</h1>
-                        </div>
-                    </Link>
-
-                    <h3 className="text-4xl font-serif font-bold leading-tight mb-6">
-                        Your Vigilance,<br /> <span className="text-yellow-500">Our Action.</span>
-                    </h3>
-                    <p className="text-blue-200 text-sm leading-relaxed max-w-sm mb-12">
-                        This digital portal empowers every citizen to report civic issues directly to the concerned department with real-time tracking and AI-enabled verification.
+        return (
+            <div className="page-bg" style={{
+                minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20
+            }}>
+                <motion.div
+                    initial={{ scale: 0.9, opacity: 0 }}
+                    animate={{ scale: 1, opacity: 1 }}
+                    className="card-js"
+                    style={{ maxWidth: 520, width: '100%', padding: 40, textAlign: 'center' }}
+                >
+                    <div style={{
+                        width: 80, height: 80, borderRadius: '50%',
+                        background: '#e6f4ea', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        margin: '0 auto 24px', fontSize: 40
+                    }}>✅</div>
+                    <h2 style={{ fontSize: 28, marginBottom: 8 }}>Submitted Successfully</h2>
+                    <p style={{ fontSize: 15, color: 'var(--text-secondary)', marginBottom: 32 }}>
+                        Your complaint has been registered and will be routed to the relevant department.
+                        {email && (
+                            <span style={{ display: 'block', marginTop: 8, fontWeight: 600, color: 'var(--accent)' }}>
+                                📧 Confirmation sent to {email}
+                            </span>
+                        )}
                     </p>
 
-                    {/* Steps */}
-                    <div className="space-y-6">
-                        {[
-                            { step: '01', title: 'Describe Issue', desc: 'Provide clear details of the problem.' },
-                            { step: '02', title: 'Upload Proof', desc: 'Attach a photo for AI verification.' },
-                            { step: '03', title: 'Track Resolution', desc: 'Get updates on your dashboard.' }
-                        ].map((item, idx) => (
-                            <div key={idx} className="flex gap-4 items-start group">
-                                <span className="text-xl font-mono font-bold text-yellow-500 opacity-50 group-hover:opacity-100 transition">{item.step}</span>
-                                <div>
-                                    <h4 className="font-bold text-sm uppercase tracking-wider mb-1">{item.title}</h4>
-                                    <p className="text-xs text-blue-300">{item.desc}</p>
-                                </div>
-                            </div>
-                        ))}
+                    {/* Complaint ID with Copy Button */}
+                    <div style={{
+                        padding: '20px 24px', background: 'var(--bg-secondary)', borderRadius: 16, marginBottom: 32,
+                        position: 'relative'
+                    }}>
+                        <div style={{ fontSize: 12, color: 'var(--text-secondary)', fontWeight: 600, marginBottom: 8, letterSpacing: '0.08em' }}>
+                            COMPLAINT ID
+                        </div>
+                        <div style={{
+                            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12
+                        }}>
+                            <div style={{
+                                fontSize: idFontSize, fontWeight: 700, color: 'var(--accent)',
+                                fontFamily: 'var(--font-heading)', letterSpacing: '0.03em',
+                                wordBreak: 'break-all', lineHeight: 1.3
+                            }}>{displayId}</div>
+                            <button
+                                onClick={handleCopy}
+                                title="Copy to clipboard"
+                                style={{
+                                    background: copied ? 'var(--color-success)' : 'white',
+                                    border: `1.5px solid ${copied ? 'var(--color-success)' : 'var(--border-light)'}`,
+                                    borderRadius: 10, width: 38, height: 38, cursor: 'pointer',
+                                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                    transition: 'all 0.2s ease', flexShrink: 0
+                                }}
+                            >
+                                {copied ? (
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                        <polyline points="20 6 9 17 4 12" />
+                                    </svg>
+                                ) : (
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                                        <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
+                                    </svg>
+                                )}
+                            </button>
+                        </div>
+                        {copied && (
+                            <div style={{
+                                fontSize: 12, color: 'var(--color-success)', fontWeight: 600, marginTop: 8
+                            }}>Copied to clipboard!</div>
+                        )}
                     </div>
-                </div>
 
-                <div className="relative z-10 text-[10px] text-blue-400 uppercase tracking-widest mt-12 md:mt-0">
-                    © 2024 Ministry of Urban Affairs
-                </div>
+                    <div style={{ display: 'flex', gap: 12, justifyContent: 'center', flexWrap: 'wrap' }}>
+                        <Link to="/track" className="btn-primary">Track Status</Link>
+                        <Link to="/" className="btn-secondary">Back Home</Link>
+                    </div>
+                </motion.div>
             </div>
+        );
+    }
 
-            {/* --- RIGHT PANEL: FORM --- */}
-            <div className="w-full md:w-[60%] bg-white md:h-screen md:overflow-y-auto">
-                <div className="max-w-2xl mx-auto p-8 md:p-16">
-                    <div className="flex justify-between items-center mb-10">
-                        <h2 className="text-2xl font-serif font-bold text-gray-800 flex items-center gap-2">
-                            <span className="text-3xl">✍️</span> File a Grievance
-                        </h2>
-                        <span className="bg-green-100 text-green-800 text-[10px] font-bold px-3 py-1 rounded-full uppercase tracking-wide">
-                            Official Portal
-                        </span>
-                    </div>
+    /* ─── Form Screen ─── */
+    const isGuest = !loggedInUser;
 
-                    <form onSubmit={handleSubmit} className="space-y-8">
+    return (
+        <div className="page-bg" style={{
+            minHeight: '100vh', padding: '40px 20px', position: 'relative', overflow: 'hidden'
+        }}>
+            <div className="blob" style={{ width: 400, height: 400, background: 'var(--bg-secondary)', top: '-10%', right: '-5%' }} />
 
-                        {/* 1. DESCRIPTION */}
-                        <div className="group">
-                            <label className="block text-xs font-bold text-gray-400 uppercase tracking-widest mb-3 group-focus-within:text-blue-900 transition">
-                                1. Issue Description <span className="text-red-500">*</span>
+            <div className="container-js" style={{ maxWidth: 640, paddingTop: 40 }}>
+                {/* Header */}
+                <div style={{ marginBottom: 32 }}>
+                    <Link to="/" style={{
+                        display: 'inline-flex', alignItems: 'center', gap: 8,
+                        textDecoration: 'none', fontSize: 14, fontWeight: 500,
+                        color: 'var(--text-secondary)', marginBottom: 24
+                    }}>
+                        ← Back to Home
+                    </Link>
+                    <h1 style={{ fontSize: 'clamp(28px, 4vw, 40px)', marginBottom: 8 }}>
+                        Report a Civic Issue
+                    </h1>
+                    <p style={{ maxWidth: 480 }}>
+                        Describe the problem, upload evidence, and we'll route it to the right department using AI.
+                    </p>
+                    {isGuest && (
+                        <div style={{
+                            marginTop: 16, padding: '12px 16px', borderRadius: 12,
+                            background: '#EAF2FF', border: '1px solid rgba(43,107,255,0.15)',
+                            fontSize: 13, color: 'var(--accent)', fontWeight: 500
+                        }}>
+                            💡 You're submitting as a guest. Save your complaint ID from the success screen to track later. Optionally provide email for notifications.
+                            <Link to="/login" style={{ color: 'var(--accent)', fontWeight: 700, marginLeft: 4 }}>
+                                Login for full tracking →
+                            </Link>
+                        </div>
+                    )}
+                </div>
+
+                {/* Steps indicator */}
+                <div style={{
+                    display: 'flex', gap: 16, marginBottom: 32, flexWrap: 'wrap'
+                }}>
+                    {[
+                        { n: '1', label: 'Describe', done: description.length > 0 },
+                        { n: '2', label: 'Photo', done: !!image },
+                        { n: '3', label: 'Location', done: !!location },
+                        { n: '4', label: isGuest ? 'Email' : 'Submit', done: isGuest ? !!email.trim() : false },
+                    ].map((step, i) => (
+                        <div key={i} style={{
+                            display: 'flex', alignItems: 'center', gap: 8
+                        }}>
+                            <div style={{
+                                width: 28, height: 28, borderRadius: '50%',
+                                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                fontSize: 12, fontWeight: 700,
+                                background: step.done ? 'var(--color-success)' : 'var(--bg-secondary)',
+                                color: step.done ? 'white' : 'var(--text-secondary)'
+                            }}>
+                                {step.done ? '✓' : step.n}
+                            </div>
+                            <span style={{ fontSize: 13, fontWeight: 500, color: step.done ? 'var(--color-success)' : 'var(--text-secondary)' }}>
+                                {step.label}
+                            </span>
+                            {i < 3 && <span style={{ color: 'var(--border-light)', margin: '0 4px' }}>—</span>}
+                        </div>
+                    ))}
+                </div>
+
+                {/* Form Card */}
+                <div className="card-js" style={{ padding: 32 }}>
+                    <form onSubmit={handleSubmit}>
+
+                        {/* 1. Description */}
+                        <div style={{ marginBottom: 24 }}>
+                            <label style={{ display: 'block', fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 8 }}>
+                                Issue Description <span style={{ color: 'var(--color-danger)' }}>*</span>
                             </label>
-                            <div className="relative">
+                            <div style={{ position: 'relative' }}>
                                 <textarea
                                     value={description}
                                     onChange={(e) => setDescription(e.target.value)}
-                                    placeholder="Describe the issue in detail..."
-                                    className="w-full h-40 p-5 bg-gray-50 border-2 border-transparent rounded-sm focus:bg-white focus:border-blue-900 focus:shadow-lg outline-none resize-none transition-all text-gray-700 placeholder-gray-400"
+                                    placeholder="Describe the issue in detail... You can also use voice input →"
+                                    className="input-js"
                                     maxLength={500}
+                                    style={{ minHeight: 140, paddingRight: 50 }}
                                 />
                                 <button
                                     type="button"
                                     onMouseDown={startListening}
-                                    className={`absolute top-4 right-4 p-2 rounded-full transition-all ${isListening ? 'bg-red-500 text-white shadow-red-500/50 shadow-lg scale-110' : 'bg-white text-gray-400 hover:text-blue-900 shadow-sm'}`}
-                                >
-                                    🎤
-                                </button>
-                                <div className="absolute bottom-4 right-4 text-[10px] font-bold text-gray-400">
-                                    {description.length} / 500
-                                </div>
+                                    style={{
+                                        position: 'absolute', top: 12, right: 12,
+                                        width: 36, height: 36, borderRadius: '50%',
+                                        border: 'none', cursor: 'pointer', fontSize: 16,
+                                        transition: 'all 0.2s',
+                                        background: isListening ? 'var(--color-danger)' : 'var(--bg-secondary)',
+                                        color: isListening ? 'white' : 'var(--text-secondary)',
+                                        boxShadow: isListening ? '0 0 0 4px rgba(234,67,53,0.2)' : 'none'
+                                    }}
+                                >🎤</button>
                             </div>
-                        </div>
-
-                        {/* 2. IMAGE UPLOAD */}
-                        <div className="group">
-                            <label className="block text-xs font-bold text-gray-400 uppercase tracking-widest mb-3 group-focus-within:text-blue-900 transition">
-                                2. Photographic Evidence <span className="text-red-500">*</span>
-                            </label>
-
-                            <div className="relative">
-                                <input
-                                    type="file"
-                                    accept="image/*"
-                                    onChange={handleImageChange}
-                                    className="hidden"
-                                    id="complaint-image"
-                                />
-                                <label
-                                    htmlFor="complaint-image"
-                                    className={`flex flex-col items-center justify-center w-full h-48 border-2 border-dashed rounded-sm cursor-pointer transition-all duration-300 ${imagePreview ? 'border-green-500 bg-green-50' : 'border-gray-300 bg-gray-50 hover:bg-gray-100 hover:border-blue-400'}`}
-                                >
-                                    {imagePreview ? (
-                                        <div className="relative w-full h-full p-2 group-img">
-                                            <img src={imagePreview} alt="Preview" className="w-full h-full object-cover rounded-sm shadow-sm" />
-                                            <div className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-img-hover:opacity-100 transition">
-                                                <span className="text-white font-bold text-sm uppercase tracking-wider">Change Image</span>
-                                            </div>
-                                        </div>
-                                    ) : (
-                                        <>
-                                            <div className="w-12 h-12 bg-blue-100 text-blue-900 rounded-full flex items-center justify-center mb-3 text-xl">
-                                                📷
-                                            </div>
-                                            <span className="text-sm font-bold text-gray-600">Click to Upload Image</span>
-                                            <span className="text-[10px] text-gray-400 mt-1 uppercase tracking-wide">Supports JPG, PNG</span>
-                                        </>
-                                    )}
-                                </label>
-                            </div>
-                        </div>
-
-                        {/* 3. LOCATION */}
-                        <div className="group">
-                            <label className="block text-xs font-bold text-gray-400 uppercase tracking-widest mb-3 group-focus-within:text-blue-900 transition">
-                                3. Incident Location <span className="text-red-500">*</span>
-                            </label>
-
-                            <div className="bg-gray-50 p-4 border-2 border-dashed border-gray-300 rounded-sm">
-                                <div className="flex items-center justify-between">
-                                    <div className="text-sm text-gray-600">
-                                        {location ? (
-                                            <span className="font-mono text-green-700 font-bold">
-                                                ✅ Lat: {location.lat.toFixed(6)}, Lng: {location.lng.toFixed(6)}
-                                            </span>
-                                        ) : (
-                                            "Location is required for accurate resolution."
-                                        )}
-                                    </div>
-                                    <button
-                                        type="button"
-                                        onClick={getLocation}
-                                        disabled={locationStatus === 'loading'}
-                                        className={`px-4 py-2 rounded-sm text-xs font-bold uppercase tracking-wider transition ${location ? 'bg-green-100 text-green-800' : 'bg-blue-100 text-blue-800 hover:bg-blue-200'}`}
-                                    >
-                                        {locationStatus === 'loading' ? 'Detecting...' : location ? 'Update Location' : '📍 Detect Location'}
-                                    </button>
-                                </div>
-                                {locationStatus === 'error' && (
-                                    <p className="text-xs text-red-500 mt-2 font-bold">⚠️ Location access denied or unavailable.</p>
-                                )}
-                            </div>
-                        </div>
-
-                        {/* 4. DECLARATION */}
-                        <div className="bg-yellow-50/50 p-5 rounded-sm border-l-4 border-yellow-400">
-                            <label className="flex items-start gap-3 cursor-pointer select-none">
-                                <div className="relative flex items-center">
-                                    <input
-                                        type="checkbox"
-                                        checked={declaration}
-                                        onChange={(e) => setDeclaration(e.target.checked)}
-                                        className="peer h-5 w-5 cursor-pointer appearance-none rounded border border-gray-300 shadow transition-all checked:border-blue-900 checked:bg-blue-900 hover:shadow-md"
-                                    />
-                                    <span className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-white opacity-0 peer-checked:opacity-100">
-                                        ✔
+                            <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6 }}>
+                                {isListening && (
+                                    <span style={{ fontSize: 12, color: 'var(--color-danger)', fontWeight: 600 }}>
+                                        🔴 Listening...
                                     </span>
+                                )}
+                                <span style={{ fontSize: 12, color: 'var(--text-secondary)', marginLeft: 'auto' }}>
+                                    {description.length}/500
+                                </span>
+                            </div>
+                        </div>
+
+                        {/* 2. Image Upload */}
+                        <div style={{ marginBottom: 24 }}>
+                            <label style={{ display: 'block', fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 8 }}>
+                                Photo Evidence <span style={{ color: 'var(--color-danger)' }}>*</span>
+                            </label>
+                            <input type="file" accept="image/*" onChange={handleImageChange} id="complaint-image" style={{ display: 'none' }} />
+                            <label htmlFor="complaint-image" style={{
+                                display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+                                width: '100%', height: imagePreview ? 220 : 160,
+                                border: `2px dashed ${imagePreview ? 'var(--color-success)' : 'rgba(14,26,51,0.12)'}`,
+                                borderRadius: 16, cursor: 'pointer',
+                                background: imagePreview ? '#f0fdf4' : 'var(--bg-primary)',
+                                transition: 'all 0.2s', overflow: 'hidden'
+                            }}>
+                                {imagePreview ? (
+                                    <img src={imagePreview} alt="Preview" style={{
+                                        width: '100%', height: '100%', objectFit: 'cover', borderRadius: 14
+                                    }} />
+                                ) : (
+                                    <>
+                                        <div className="icon-container" style={{ marginBottom: 12, fontSize: 24 }}>📷</div>
+                                        <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>Click to upload photo</span>
+                                        <span style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 4 }}>JPG, PNG supported</span>
+                                    </>
+                                )}
+                            </label>
+                        </div>
+
+                        {/* 3. Location */}
+                        <div style={{ marginBottom: 24 }}>
+                            <label style={{ display: 'block', fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 8 }}>
+                                Location <span style={{ color: 'var(--color-danger)' }}>*</span>
+                            </label>
+                            <div style={{
+                                padding: '16px 20px', borderRadius: 16,
+                                background: location ? '#f0fdf4' : 'var(--bg-secondary)',
+                                border: `1px solid ${location ? 'var(--color-success)' : 'transparent'}`,
+                                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                                gap: 12, flexWrap: 'wrap'
+                            }}>
+                                <div style={{ fontSize: 14 }}>
+                                    {location ? (
+                                        <span style={{ fontWeight: 600, color: 'var(--color-success)' }}>
+                                            ✅ {location.lat.toFixed(6)}, {location.lng.toFixed(6)}
+                                        </span>
+                                    ) : (
+                                        <span style={{ color: 'var(--text-secondary)' }}>Auto-detect your GPS location</span>
+                                    )}
                                 </div>
-                                <span className="text-xs text-gray-600 leading-relaxed pt-0.5">
-                                    I hereby declare that the information provided is accurate. I understand that submitting false complaints is a punishable offense.
+                                <button
+                                    type="button"
+                                    onClick={getLocation}
+                                    disabled={locationStatus === 'loading'}
+                                    className={location ? 'pill-js pill-js--success' : 'btn-primary'}
+                                    style={location ? { fontSize: 12, height: 32, padding: '0 14px' } : { padding: '8px 20px', fontSize: 12 }}
+                                >
+                                    {locationStatus === 'loading' ? 'Detecting...' : location ? 'Update' : '📍 Detect Location'}
+                                </button>
+                            </div>
+                            {locationStatus === 'error' && (
+                                <p style={{ fontSize: 12, color: 'var(--color-danger)', marginTop: 8, fontWeight: 600 }}>
+                                    ⚠️ Location access denied or unavailable.
+                                </p>
+                            )}
+                        </div>
+
+                        {/* 4. Email (Required for guests, optional for logged-in users) */}
+                        <div style={{ marginBottom: 24 }}>
+                            <label style={{ display: 'block', fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 8 }}>
+                                Email for Notifications <span style={{ fontSize: 11, fontWeight: 400, color: 'var(--text-secondary)' }}></span>
+                            </label>
+                            <div style={{
+                                padding: '4px', borderRadius: 16,
+                                background: 'var(--bg-secondary)',
+                                border: `1px solid ${email.trim() ? 'var(--accent)' : 'transparent'}`,
+                            }}>
+                                <input
+                                    type="email"
+                                    value={email}
+                                    onChange={(e) => setEmail(e.target.value)}
+                                    placeholder="your@email.com — to receive complaint ID & updates"
+                                    className="input-js"
+                                    style={{
+                                        background: 'transparent', border: 'none',
+                                        padding: '12px 16px', width: '100%', boxSizing: 'border-box'
+                                    }}
+                                    readOnly={!!loggedInUser?.email}
+                                />
+                            </div>
+                            <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 6 }}>
+                                {isGuest
+                                    ? '📧 Optional: Get your complaint ID & status updates via email. Use the same email to register later and see full history.'
+                                    : '📧 Status updates will be sent to your registered email.'}
+                            </p>
+                        </div>
+
+                        {/* 5. Declaration */}
+                        <div style={{
+                            padding: '16px 20px', borderRadius: 16,
+                            background: '#fffbeb', borderLeft: '3px solid var(--color-warning)',
+                            marginBottom: 24
+                        }}>
+                            <label style={{ display: 'flex', alignItems: 'flex-start', gap: 12, cursor: 'pointer' }}>
+                                <input
+                                    type="checkbox"
+                                    checked={declaration}
+                                    onChange={(e) => setDeclaration(e.target.checked)}
+                                    style={{ marginTop: 3, accentColor: 'var(--accent)' }}
+                                />
+                                <span style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+                                    I declare that the information provided is accurate. Submitting false complaints is a punishable offense.
                                 </span>
                             </label>
                         </div>
 
-                        {/* ERRORS */}
+                        {/* Error */}
                         {errorMsg && (
-                            <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} className="text-red-700 bg-red-50 px-4 py-3 rounded-sm text-sm font-bold flex items-center gap-2">
+                            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} style={{
+                                padding: '12px 16px', borderRadius: 12,
+                                background: '#fef2f2', border: '1px solid #fecaca',
+                                color: 'var(--color-danger)', fontSize: 14, fontWeight: 500, marginBottom: 20
+                            }}>
                                 ⚠️ {errorMsg}
                             </motion.div>
                         )}
 
-                        {/* ACTION */}
-                        <div className="pt-4">
-                            <button
-                                type="submit"
-                                disabled={submissionStatus === 'loading'}
-                                className="w-full py-5 bg-[#001f3f] text-white font-bold uppercase tracking-[0.2em] rounded-sm shadow-xl hover:bg-blue-900 hover:shadow-2xl transition transform hover:-translate-y-1 disabled:opacity-70 disabled:translate-y-0"
-                            >
-                                {submissionStatus === 'loading' ? 'Processing...' : 'Submit Grievance'}
-                            </button>
-                            <p className="text-center text-[10px] text-gray-400 mt-4 uppercase tracking-widest">
-                                Secure Server • Encrypted Transmission
-                            </p>
-                        </div>
+                        {/* Submit */}
+                        <button
+                            type="submit"
+                            className="btn-primary"
+                            disabled={submissionStatus === 'loading'}
+                            style={{ width: '100%', opacity: submissionStatus === 'loading' ? 0.7 : 1 }}
+                        >
+                            {submissionStatus === 'loading' ? 'Processing...' : 'Submit Complaint'}
+                        </button>
 
+                        <p style={{ textAlign: 'center', fontSize: 12, color: 'var(--text-secondary)', marginTop: 16 }}>
+                            🔒 Secure & Encrypted Transmission
+                        </p>
                     </form>
                 </div>
             </div>

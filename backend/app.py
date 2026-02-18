@@ -25,11 +25,17 @@ def log_request_info():
 # Initialize Database
 init_db(app)
 
+# Start background escalation scanner (daemon thread)
+from services.escalation_service import start_escalation_service
+start_escalation_service()
+
 # Register Blueprints
 app.register_blueprint(auth_bp, url_prefix='/api/auth')
 app.register_blueprint(complaint_bp, url_prefix='/api/complaint')
 app.register_blueprint(worker_bp, url_prefix='/api/worker')
 app.register_blueprint(admin_bp, url_prefix='/api/admin')
+from routes.dept_officer_routes import dept_officer_bp
+app.register_blueprint(dept_officer_bp, url_prefix='/api/dept-officer')
 from routes.notification_routes import notification_bp
 app.register_blueprint(notification_bp, url_prefix='/api/notifications')
 

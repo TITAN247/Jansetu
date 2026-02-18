@@ -1,11 +1,20 @@
 from pymongo import MongoClient
 import pprint
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 def main():
     try:
-        client = MongoClient('mongodb://localhost:27017/')
-        db = client['jansetu_ai']
-        print("Connected to jansetu_ai")
+        uri = os.getenv('MONGO_URI', 'mongodb://localhost:27017/')
+        client = MongoClient(uri)
+        # Handle database name extraction if implicit in URI or default
+        db_name = os.getenv('DB_NAME', 'jansetu_ai')
+        # If the URI specifies a db, get_database() without args uses it, but pymongo client connects to server
+        # Explicitly get the database
+        db = client[db_name]
+        print(f"Connected to {db_name}")
         
         cols = db.list_collection_names()
         print(f"Collections: {cols}")

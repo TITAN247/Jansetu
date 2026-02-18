@@ -1,213 +1,337 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import { loginUser, registerUser } from '../services/api'; // Reuse existing API services
+import { loginUser, registerUser, verifyAdminAccessCode, getUPDistricts } from '../services/api';
 import { motion } from 'framer-motion';
 
 const OfficialAuth = () => {
     const [isLogin, setIsLogin] = useState(true);
-    const [formData, setFormData] = useState({
-        name: '',
-        email: '',
-        password: '',
-        role: 'admin', // Default to admin for this page
-        department: '' // Not really used for admin/governance typically, but kept for schema consistency if needed
-    });
+    const [formData, setFormData] = useState({ name: '', email: '', password: '', role: 'admin', department: '', access_code: '', district: '' });
     const [error, setError] = useState('');
     const [loading, setLoading] = useState(false);
+    const [accessCodeVerified, setAccessCodeVerified] = useState(false);
+    const [accessCodeError, setAccessCodeError] = useState('');
+    const [upDistricts, setUpDistricts] = useState([]);
     const navigate = useNavigate();
 
-    const handleChange = (e) => {
-        setFormData({ ...formData, [e.target.name]: e.target.value });
-    };
+    // Password format validation
+    const passwordChecks = [
+        { label: 'Min 8 characters', test: (p) => p.length >= 8 },
+        { label: 'Uppercase letter', test: (p) => /[A-Z]/.test(p) },
+        { label: 'Lowercase letter', test: (p) => /[a-z]/.test(p) },
+        { label: 'A digit (0-9)', test: (p) => /[0-9]/.test(p) },
+        { label: 'Special char (!@#$%)', test: (p) => /[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/.test(p) },
+    ];
+    const isPasswordValid = isLogin || passwordChecks.every(c => c.test(formData.password));
 
+    useEffect(() => {
+        // Fetch UP districts for dropdown
+        const fetchDistricts = async () => {
+            try {
+                const data = await getUPDistricts();
+                setUpDistricts(Array.isArray(data) ? data : []);
+            } catch { /* Districts will be empty */ }
+        };
+        fetchDistricts();
+    }, []);
+
+    const handleChange = (e) => setFormData({ ...formData, [e.target.name]: e.target.value });
     const handleRoleSelect = (role) => {
         setFormData({ ...formData, role });
+        setAccessCodeVerified(false);
+        setAccessCodeError('');
+    };
+
+    const handleVerifyCode = async () => {
+        if (!formData.access_code.trim()) {
+            setAccessCodeError('Please enter an access code.');
+            return;
+        }
+        try {
+            const result = await verifyAdminAccessCode(formData.access_code);
+            if (result.valid) {
+                // Auto-set the role based on the code
+                setFormData(prev => ({ ...prev, role: result.role }));
+                setAccessCodeVerified(true);
+                setAccessCodeError('');
+            }
+        } catch (err) {
+            setAccessCodeError(err.response?.data?.message || 'Invalid access code.');
+            setAccessCodeVerified(false);
+        }
     };
 
     const handleSubmit = async (e) => {
         e.preventDefault();
-        setLoading(true);
-        setError('');
-
+        setLoading(true); setError('');
         try {
             if (isLogin) {
-                // LOGIN LOGIC
-                const data = await loginUser(formData.email, formData.password);
+                // 'admin_portal' context: only administration roles should be allowed here.
+                const data = await loginUser(formData.email, formData.password, 'admin_portal');
+                if (!data?.user) throw { response: { data: { error: 'Invalid response.' } } };
+                const role = data.user.role;
 
-                if (!data || !data.user) {
-                    throw { response: { data: { error: 'Invalid server response.' } } };
+                // Enforce that only admin / governance can use this form
+                if (role !== 'admin' && role !== 'governance') {
+                    // Clear any token/user that may have been set
+                    localStorage.removeItem('token');
+                    localStorage.removeItem('user');
+                    throw { response: { data: { error: 'Access restricted to administration roles only.' } } };
                 }
 
-                // Strict Role Check for this Portal
-                if (data.user.role !== 'admin' && data.user.role !== 'governance') {
-                    throw { response: { data: { error: 'Access restricted to Official Authorities only.' } } };
-                }
-
-                if (data.user.role !== formData.role) {
-                    // If user selects 'admin' but is 'governance' in DB, or vice versa
-                    // We could block it, or just allow it and redirect based on ACTUAL role.
-                    // For security/clarity, let's allow the DB role to dictate the redirect.
-                }
-
-                if (data.user.role === 'admin') navigate('/admin-dashboard');
-                else if (data.user.role === 'governance') navigate('/governance-dashboard');
-                else setError("Unauthorized role.");
-
+                if (role === 'admin') navigate('/admin-dashboard');
+                else if (role === 'governance') navigate('/governance-dashboard');
+                else setError('Unauthorized role.');
             } else {
-                // REGISTER LOGIC
+                // Registration requires verified access code
+                if (!accessCodeVerified) {
+                    setError('Please verify your access code first.');
+                    setLoading(false);
+                    return;
+                }
+                if (!isPasswordValid) {
+                    setError('Password does not meet the required format.');
+                    setLoading(false);
+                    return;
+                }
                 await registerUser(formData);
-                alert('Official Account Registration successful! Please login.');
-                setIsLogin(true); // Switch to login view
+                alert('Registration successful! Please login.');
+                setIsLogin(true);
+                setAccessCodeVerified(false);
             }
         } catch (err) {
-            console.error(err);
-            setError(err.response?.data?.error || 'Authentication failed. Please verify credentials.');
-        } finally {
-            setLoading(false);
-        }
+            setError(err.response?.data?.error || 'Authentication failed.');
+        } finally { setLoading(false); }
     };
 
     return (
-        <div className="min-h-screen flex bg-[#001f3f] font-sans text-white">
-
-            {/* LEFT: Branding */}
+        <div className="page-bg" style={{ minHeight: '100vh', display: 'flex' }}>
+            {/* Left Branding */}
             <motion.div
-                initial={{ opacity: 0, x: -50 }}
-                animate={{ opacity: 1, x: 0 }}
-                className="hidden lg:flex w-1/2 flex-col justify-center p-16 relative overflow-hidden border-r-4 border-yellow-500"
+                initial={{ opacity: 0, x: -30 }} animate={{ opacity: 1, x: 0 }}
+                style={{
+                    display: 'none', width: '50%', flexDirection: 'column', justifyContent: 'center',
+                    padding: 64, background: 'var(--text-primary)', color: 'white', position: 'relative', overflow: 'hidden'
+                }}
+                className="official-auth-left"
             >
-                <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/cubes.png')] opacity-10"></div>
+                <div style={{
+                    position: 'absolute', top: 0, left: 0, bottom: 0, width: 4,
+                    background: 'linear-gradient(to bottom, #f97316, white, #22c55e)'
+                }} />
 
-                {/* Tricolor Strip on Side */}
-                <div className="absolute left-0 top-0 bottom-0 w-2 bg-gradient-to-b from-orange-500 via-white to-green-600"></div>
+                <div style={{ position: 'relative', zIndex: 1, paddingLeft: 24 }}>
+                    <div style={{
+                        width: 64, height: 64, background: 'white', borderRadius: 16,
+                        display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 32
+                    }}>
+                        <img src="https://upload.wikimedia.org/wikipedia/commons/5/55/Emblem_of_India.svg"
+                            style={{ height: 44 }} alt="Emblem" />
+                    </div>
 
-                <div className="relative z-10 pl-8">
-                    <div className="w-20 h-20 bg-white rounded-sm flex items-center justify-center mb-8 shadow-2xl shadow-blue-900/50">
-                        <img src="https://upload.wikimedia.org/wikipedia/commons/5/55/Emblem_of_India.svg" className="h-14" alt="Emblem" />
-                    </div>
-                    <div className="inline-block px-2 py-0.5 border border-yellow-500 text-yellow-500 text-[10px] font-bold uppercase tracking-widest mb-4">
-                        Restricted Access
-                    </div>
-                    <h1 className="text-5xl font-serif font-bold tracking-tight mb-4 text-white">
-                        Official Authority <br /> <span className="text-yellow-500">Portal</span>
+                    <span style={{
+                        fontSize: 11, fontWeight: 700, padding: '4px 12px', border: '1px solid rgba(255,255,255,0.3)',
+                        borderRadius: 20, color: 'rgba(255,255,255,0.7)', letterSpacing: '0.1em', textTransform: 'uppercase'
+                    }}>Restricted Access</span>
+
+                    <h1 style={{
+                        fontSize: 40, fontFamily: 'var(--font-heading)', fontWeight: 700,
+                        marginTop: 24, marginBottom: 16, lineHeight: 1.2
+                    }}>
+                        Official Authority<br />
+                        <span style={{ color: 'var(--accent)' }}>Portal</span>
                     </h1>
-                    <p className="text-lg text-blue-200 max-w-lg mb-8 font-light leading-relaxed">
-                        Secure Gateway for Municipal Administration and Governance Bodies to manage civic operations.
+                    <p style={{ fontSize: 16, color: 'rgba(255,255,255,0.6)', maxWidth: 400, lineHeight: 1.7 }}>
+                        Secure gateway for municipal administration and governance bodies.
+                        <br /><br />
+                        <span style={{ fontSize: 13, color: 'rgba(255,255,255,0.4)' }}>
+                            🔐 Access Code required for registration. Codes are generated by developers only.
+                        </span>
                     </p>
-
-                    <div className="flex gap-4 text-[10px] font-mono text-blue-300 border-t border-blue-800 pt-8 mt-8 uppercase tracking-widest">
-                        <span>SESSION ID: {Math.random().toString(36).substring(7).toUpperCase()}</span>
-                        <span>•</span>
-                        <span>ENC: AES-256</span>
-                    </div>
                 </div>
             </motion.div>
 
-            {/* RIGHT: Form */}
-            <div className="w-full lg:w-1/2 flex items-center justify-center p-8 bg-gray-50 text-gray-900 relative">
-                {/* Mobile Tricolor Top Strip */}
-                <div className="lg:hidden absolute top-0 left-0 w-full h-1.5 bg-gradient-to-r from-orange-500 via-white to-green-600"></div>
-
-                <Link to="/" className="absolute top-6 right-6 text-gray-500 hover:text-blue-900 flex items-center gap-2 transition-colors z-40 font-bold text-xs uppercase tracking-wide">
-                    Return to Home →
-                </Link>
+            {/* Right Form */}
+            <div style={{
+                flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                padding: 32, position: 'relative'
+            }}>
+                <Link to="/" style={{
+                    position: 'absolute', top: 24, right: 32, fontSize: 13, fontWeight: 600,
+                    color: 'var(--text-secondary)', textDecoration: 'none'
+                }}>← Home</Link>
 
                 <motion.div
-                    initial={{ opacity: 0, y: 20 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    className="w-full max-w-md bg-white p-10 rounded-sm shadow-xl border-t-4 border-blue-900"
+                    initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}
+                    className="card-js" style={{ width: '100%', maxWidth: 440, padding: 40 }}
                 >
-                    <div className="mb-8 text-center border-b border-gray-100 pb-6">
-                        <h2 className="text-2xl font-serif font-bold text-gray-900">
+                    <div style={{ textAlign: 'center', marginBottom: 32, paddingBottom: 24, borderBottom: '1px solid var(--border-light)' }}>
+                        <h2 style={{ fontSize: 24, fontWeight: 600, marginBottom: 8 }}>
                             {isLogin ? 'Authority Login' : 'Official Registration'}
                         </h2>
-                        <p className="text-xs font-bold text-red-600 uppercase tracking-wider mt-2 bg-red-50 inline-block px-2 py-1 rounded-sm">
-                            Authorized Personnel Only
-                        </p>
+                        <span style={{
+                            fontSize: 11, fontWeight: 600, color: 'var(--color-danger)',
+                            background: '#fef2f2', padding: '4px 12px', borderRadius: 20
+                        }}>Authorized Personnel Only</span>
                     </div>
 
-                    <form onSubmit={handleSubmit} className="space-y-6">
+                    <form onSubmit={handleSubmit}>
                         {error && (
-                            <div className="bg-red-50 border-l-4 border-red-600 text-red-700 p-3 text-sm rounded-sm font-medium">
-                                <strong>Access Error:</strong> {error}
+                            <div style={{
+                                padding: '12px 16px', background: '#fef2f2', borderRadius: 12,
+                                borderLeft: '3px solid var(--color-danger)', fontSize: 13,
+                                color: 'var(--color-danger)', marginBottom: 20
+                            }}>
+                                <strong>Error:</strong> {error}
                             </div>
                         )}
 
                         {/* Role Toggle */}
-                        <div className="flex bg-gray-100 p-1 rounded-sm mb-4 border border-gray-200">
+                        <div style={{
+                            display: 'flex', background: 'var(--bg-secondary)', borderRadius: 12,
+                            padding: 4, marginBottom: 24
+                        }}>
                             {['admin', 'governance'].map(role => (
-                                <button
-                                    key={role}
-                                    type="button"
-                                    onClick={() => handleRoleSelect(role)}
-                                    className={`flex-1 py-3 text-xs font-bold uppercase tracking-wider rounded-sm transition-all ${formData.role === role ? 'bg-white shadow-sm text-blue-900 border border-gray-200' : 'text-gray-500 hover:text-gray-700'
-                                        }`}
-                                >
-                                    {role}
-                                </button>
+                                <button key={role} type="button" onClick={() => handleRoleSelect(role)} style={{
+                                    flex: 1, padding: '12px 0', border: 'none', cursor: 'pointer',
+                                    borderRadius: 10, fontSize: 13, fontWeight: 600,
+                                    fontFamily: 'var(--font-body)', transition: 'all 0.2s',
+                                    textTransform: 'capitalize',
+                                    background: formData.role === role ? 'white' : 'transparent',
+                                    boxShadow: formData.role === role ? 'var(--shadow-card)' : 'none',
+                                    color: formData.role === role ? 'var(--text-primary)' : 'var(--text-secondary)'
+                                }}>{role}</button>
                             ))}
                         </div>
 
                         {!isLogin && (
-                            <div>
-                                <label className="block text-xs font-bold uppercase text-gray-500 mb-1">Official Name</label>
-                                <input
-                                    name="name"
-                                    type="text"
-                                    required
-                                    value={formData.name}
-                                    onChange={handleChange}
-                                    className="w-full px-4 py-3 bg-gray-50 border border-gray-300 rounded-sm focus:ring-1 focus:ring-blue-900 focus:border-blue-900 outline-none text-sm transition-all focus:bg-white"
-                                    placeholder="e.g. Commissioner R.K. Singh"
-                                />
+                            <>
+                                {/* Access Code - Required for Registration */}
+                                <div style={{ marginBottom: 16 }}>
+                                    <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 6, color: '#e65100' }}>
+                                        🔐 Developer Access Code *
+                                    </label>
+                                    <div style={{ display: 'flex', gap: 8 }}>
+                                        <input className="input-js" name="access_code" type="text" required
+                                            value={formData.access_code}
+                                            onChange={(e) => {
+                                                handleChange(e);
+                                                setAccessCodeVerified(false);
+                                                setAccessCodeError('');
+                                            }}
+                                            placeholder="e.g., JANSETU-ADM-2026-ALPHA"
+                                            style={{
+                                                flex: 1, fontFamily: 'monospace', letterSpacing: '0.05em',
+                                                border: accessCodeVerified ? '2px solid #2ecc71' : accessCodeError ? '2px solid #e74c3c' : undefined
+                                            }}
+                                        />
+                                        <button type="button" onClick={handleVerifyCode}
+                                            style={{
+                                                padding: '0 16px', borderRadius: 12, border: 'none',
+                                                background: accessCodeVerified ? '#2ecc71' : 'var(--accent)',
+                                                color: 'white', fontWeight: 600, fontSize: 12, cursor: 'pointer',
+                                                whiteSpace: 'nowrap'
+                                            }}>
+                                            {accessCodeVerified ? '✅ Verified' : 'Verify'}
+                                        </button>
+                                    </div>
+                                    {accessCodeError && (
+                                        <p style={{ fontSize: 12, color: '#e74c3c', margin: '6px 0 0', fontWeight: 500 }}>
+                                            ❌ {accessCodeError}
+                                        </p>
+                                    )}
+                                    {accessCodeVerified && (
+                                        <p style={{ fontSize: 12, color: '#2ecc71', margin: '6px 0 0', fontWeight: 500 }}>
+                                            ✅ Code verified for <strong>{formData.role}</strong> role.
+                                        </p>
+                                    )}
+                                </div>
+
+                                <div style={{ marginBottom: 16 }}>
+                                    <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Official Name</label>
+                                    <input className="input-js" name="name" type="text" required value={formData.name}
+                                        onChange={handleChange} placeholder="Commissioner R.K. Singh" />
+                                </div>
+
+                                {/* UP District Selection */}
+                                <div style={{ marginBottom: 16 }}>
+                                    <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 6 }}>
+                                        📍 District (UP)
+                                    </label>
+                                    <select className="input-js" name="district" value={formData.district}
+                                        onChange={handleChange} required
+                                        style={{ width: '100%', height: 48, fontSize: 14 }}>
+                                        <option value="">— Select your district —</option>
+                                        {upDistricts.map(d => (
+                                            <option key={d.name} value={d.name}>{d.name}</option>
+                                        ))}
+                                    </select>
+                                </div>
+                            </>
+                        )}
+
+                        <div style={{ marginBottom: 16 }}>
+                            <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Email</label>
+                            <input className="input-js" name="email" type="email" required value={formData.email}
+                                onChange={handleChange} placeholder="official@jansetu.gov.in" />
+                        </div>
+
+                        <div style={{ marginBottom: !isLogin && formData.password.length > 0 ? 8 : 24 }}>
+                            <label style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Password</label>
+                            <input className="input-js" name="password" type="password" required value={formData.password}
+                                onChange={handleChange} placeholder="••••••••" />
+                        </div>
+
+                        {/* Password Strength Checklist (registration only) */}
+                        {!isLogin && formData.password.length > 0 && (
+                            <div style={{
+                                marginBottom: 24, padding: '12px 16px', borderRadius: 12,
+                                background: 'var(--bg-secondary)', border: '1px solid var(--border-light)'
+                            }}>
+                                <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>
+                                    Password Requirements
+                                </div>
+                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px 16px' }}>
+                                    {passwordChecks.map((check, i) => {
+                                        const passed = check.test(formData.password);
+                                        return (
+                                            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: passed ? '#2ecc71' : '#94a3b8', fontWeight: 500, transition: 'color 0.2s' }}>
+                                                <span style={{ fontSize: 10 }}>{passed ? '✅' : '⬜'}</span>
+                                                {check.label}
+                                            </div>
+                                        );
+                                    })}
+                                </div>
                             </div>
                         )}
 
-                        <div>
-                            <label className="block text-xs font-bold uppercase text-gray-500 mb-1">Check-in Email API</label>
-                            <input
-                                name="email"
-                                type="email"
-                                required
-                                value={formData.email}
-                                onChange={handleChange}
-                                className="w-full px-4 py-3 bg-gray-50 border border-gray-300 rounded-sm focus:ring-1 focus:ring-blue-900 focus:border-blue-900 outline-none text-sm transition-all focus:bg-white"
-                                placeholder="official@jansetu.gov.in"
-                            />
-                        </div>
-
-                        <div>
-                            <label className="block text-xs font-bold uppercase text-gray-500 mb-1">Secure Password</label>
-                            <input
-                                name="password"
-                                type="password"
-                                required
-                                value={formData.password}
-                                onChange={handleChange}
-                                className="w-full px-4 py-3 bg-gray-50 border border-gray-300 rounded-sm focus:ring-1 focus:ring-blue-900 focus:border-blue-900 outline-none text-sm transition-all focus:bg-white"
-                                placeholder="••••••••"
-                            />
-                        </div>
-
-                        <button
-                            type="submit"
-                            disabled={loading}
-                            className="w-full py-4 bg-blue-900 text-white font-bold text-sm uppercase tracking-widest rounded-sm hover:bg-blue-800 transition shadow-md disabled:opacity-70 mt-6 active:scale-[0.99]"
-                        >
-                            {loading ? 'Verifying Credentials...' : (isLogin ? 'Access Dashboard' : 'Create Official ID')}
+                        <button type="submit" className="btn-primary"
+                            disabled={loading || (!isLogin && !accessCodeVerified) || (!isLogin && !isPasswordValid)}
+                            style={{
+                                width: '100%',
+                                opacity: (loading || (!isLogin && !accessCodeVerified) || (!isLogin && !isPasswordValid)) ? 0.5 : 1
+                            }}>
+                            {loading ? 'Verifying...' : (isLogin ? 'Access Dashboard' : 'Create Official ID')}
                         </button>
                     </form>
 
-                    <div className="mt-8 text-center pt-6 border-t border-gray-100">
-                        <button
-                            onClick={() => { setIsLogin(!isLogin); setError(''); }}
-                            className="text-xs font-bold text-gray-500 hover:text-blue-900 uppercase tracking-wide hover:underline"
-                        >
-                            {isLogin ? 'Initialize New Official ID' : 'Return to Login'}
+                    <div style={{ marginTop: 24, textAlign: 'center', paddingTop: 20, borderTop: '1px solid var(--border-light)' }}>
+                        <button onClick={() => { setIsLogin(!isLogin); setError(''); setAccessCodeVerified(false); setAccessCodeError(''); }}
+                            style={{
+                                background: 'none', border: 'none', cursor: 'pointer',
+                                fontSize: 13, fontWeight: 600, color: 'var(--accent)',
+                                fontFamily: 'var(--font-body)'
+                            }}>
+                            {isLogin ? 'Create New Official ID' : 'Back to Login'}
                         </button>
                     </div>
                 </motion.div>
             </div>
+
+            <style>{`
+                @media (min-width: 1024px) {
+                    .official-auth-left { display: flex !important; }
+                }
+            `}</style>
         </div>
     );
 };

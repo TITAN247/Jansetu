@@ -1,11 +1,22 @@
-import React, { useEffect, useState } from 'react';
-import { getGovernanceAnalytics, getDeptPerformance, getComplaintTrends, getAIMetrics, getAllComplaints } from '../services/api';
-import { MapContainer, TileLayer, CircleMarker, Popup } from 'react-leaflet';
+import React, { useEffect, useState, useMemo } from 'react';
+import { getGovernanceAnalytics, getDeptPerformance, getComplaintTrends, getAIMetrics, getAllComplaints, getUPDistricts } from '../services/api';
+import { MapContainer, TileLayer, CircleMarker, Popup, useMap } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
-import { motion } from 'framer-motion';
-import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Cell, RadialBarChart, RadialBar, Legend } from 'recharts';
+import { motion, AnimatePresence } from 'framer-motion';
+import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, RadialBarChart, RadialBar, Legend } from 'recharts';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
+
+// Map recenter component
+const MapRecenter = ({ center, zoom }) => {
+    const map = useMap();
+    useEffect(() => { map.setView(center, zoom); }, [center, zoom, map]);
+    return null;
+};
+
+// UP State center
+const UP_CENTER = [26.8467, 80.9462];
+const UP_ZOOM = 7;
 
 const GovernanceDashboard = () => {
     const [kpis, setKpis] = useState(null);
@@ -14,34 +25,39 @@ const GovernanceDashboard = () => {
     const [aiMetrics, setAiMetrics] = useState(null);
     const [mapData, setMapData] = useState([]);
     const [loading, setLoading] = useState(true);
+    const [upDistricts, setUpDistricts] = useState([]);
+    const [selectedDistrict, setSelectedDistrict] = useState(''); // '' = whole state
+    const [mapCenter, setMapCenter] = useState(UP_CENTER);
+    const [mapZoom, setMapZoom] = useState(UP_ZOOM);
 
+    // Fetch districts list on mount
+    useEffect(() => {
+        const fetchDistricts = async () => {
+            try {
+                const data = await getUPDistricts();
+                setUpDistricts(Array.isArray(data) ? data : []);
+            } catch { /* fallback */ }
+        };
+        fetchDistricts();
+    }, []);
+
+    // Fetch dashboard data whenever district changes
     useEffect(() => {
         const fetchAllData = async () => {
+            setLoading(true);
             try {
                 const [kpiData, deptData, trendData, aiData, allComplaints] = await Promise.all([
-                    getGovernanceAnalytics().catch(() => ({})),
-                    getDeptPerformance().catch(() => []),
-                    getComplaintTrends().catch(() => []),
-                    getAIMetrics().catch(() => ({})),
-                    getAllComplaints().catch(() => [])
+                    getGovernanceAnalytics(selectedDistrict).catch(() => ({})),
+                    getDeptPerformance(selectedDistrict).catch(() => []),
+                    getComplaintTrends(selectedDistrict).catch(() => []),
+                    getAIMetrics(selectedDistrict).catch(() => ({})),
+                    getAllComplaints(selectedDistrict ? { district: selectedDistrict } : {}).catch(() => [])
                 ]);
 
-                // --- DUMMY DATA INJECTION (If API returns empty/null) ---
-
-                // 1. KPIs
                 if (!kpiData?.kpis || Object.keys(kpiData.kpis).length === 0) {
-                    setKpis({
-                        total_complaints: 1245,
-                        resolution_rate: 87,
-                        verification_rate: 92,
-                        citizen_satisfaction: 4.6,
-                        avg_resolution_time_hours: 28
-                    });
-                } else {
-                    setKpis(kpiData.kpis);
-                }
+                    setKpis({ total_complaints: 1245, resolution_rate: 87, verification_rate: 92, citizen_satisfaction: 4.6, avg_resolution_time_hours: 28 });
+                } else { setKpis(kpiData.kpis); }
 
-                // 2. Department Stats
                 if (!Array.isArray(deptData) || deptData.length === 0) {
                     setDeptStats([
                         { name: 'Roads & Transport', total: 450, resolution_rate: 78 },
@@ -50,78 +66,71 @@ const GovernanceDashboard = () => {
                         { name: 'Water Supply', total: 180, resolution_rate: 65 },
                         { name: 'Parks & Garden', total: 85, resolution_rate: 94 }
                     ]);
-                } else {
-                    setDeptStats(deptData);
-                }
+                } else { setDeptStats(deptData); }
 
-                // 3. Trends
                 if (!Array.isArray(trendData) || trendData.length === 0) {
                     setTrends([
-                        { month: 'Jan', complaints: 120, resolved: 100 },
-                        { month: 'Feb', complaints: 145, resolved: 130 },
-                        { month: 'Mar', complaints: 110, resolved: 95 },
-                        { month: 'Apr', complaints: 180, resolved: 160 },
-                        { month: 'May', complaints: 160, resolved: 140 },
-                        { month: 'Jun', complaints: 195, resolved: 180 }
+                        { month: 'Jan', complaints: 120, resolved: 100 }, { month: 'Feb', complaints: 145, resolved: 130 },
+                        { month: 'Mar', complaints: 110, resolved: 95 }, { month: 'Apr', complaints: 180, resolved: 160 },
+                        { month: 'May', complaints: 160, resolved: 140 }, { month: 'Jun', complaints: 195, resolved: 180 }
                     ]);
-                } else {
-                    setTrends(trendData);
-                }
+                } else { setTrends(trendData); }
 
-                // 4. AI Metrics
                 if (!aiData || Object.keys(aiData).length === 0) {
-                    setAiMetrics({
-                        category_accuracy: 94.5,
-                        priority_precision: 89.2,
-                        vision_detection_rate: 96.8,
-                        mismatches_flagged: 12
-                    });
+                    setAiMetrics({ category_accuracy: 94.5, priority_precision: 89.2, vision_detection_rate: 96.8, mismatches_flagged: 12 });
+                } else { setAiMetrics(aiData); }
+
+                // Map data: real complaints + dummy heatmap
+                const real = Array.isArray(allComplaints) ? allComplaints : [];
+                if (real.length > 0) {
+                    setMapData(real);
                 } else {
-                    setAiMetrics(aiData);
+                    // Generate dummy data around the district/state center
+                    const lat = mapCenter[0], lng = mapCenter[1];
+                    const spread = selectedDistrict ? 0.04 : 0.8;
+                    const count = selectedDistrict ? 80 : 150;
+                    const dummyHeatmap = Array.from({ length: count }).map((_, i) => ({
+                        _id: `heat_${i}`,
+                        category: i % 3 === 0 ? 'Pothole' : (i % 3 === 1 ? 'Garbage' : 'Street Light'),
+                        priority: i % 5 === 0 ? 'High' : (i % 2 === 0 ? 'Medium' : 'Low'),
+                        location: { lat: lat + (Math.random() - 0.5) * spread * 2, lng: lng + (Math.random() - 0.5) * spread * 2 }
+                    }));
+                    setMapData(dummyHeatmap);
                 }
-
-                // 5. Heatmap Map Data
-                const baseLat = 28.6139;
-                const baseLng = 77.2090;
-                // Generate 60 dummy points clustered loosely
-                const dummyHeatmapData = Array.from({ length: 150 }).map((_, i) => ({
-                    _id: `heat_${i}`,
-                    category: i % 3 === 0 ? 'Pothole' : (i % 3 === 1 ? 'Garbage' : 'Street Light'),
-                    priority: i % 5 === 0 ? 'High' : (i % 2 === 0 ? 'Medium' : 'Low'), // 20% High priority
-                    location: {
-                        lat: baseLat + (Math.random() - 0.5) * 0.08, // Wider spread (approx 8km)
-                        lng: baseLng + (Math.random() - 0.5) * 0.08
-                    }
-                }));
-
-                const realData = Array.isArray(allComplaints) ? allComplaints : [];
-                setMapData([...realData, ...dummyHeatmapData]);
-
             } catch (error) {
-                console.error("Error fetching governance data", error);
-                // Fallback catch-all if critical failure
+                console.error("Governance data error", error);
                 setKpis({ total_complaints: 0, resolution_rate: 0, verification_rate: 0, citizen_satisfaction: 0, avg_resolution_time_hours: 0 });
-            } finally {
-                setLoading(false);
-            }
+            } finally { setLoading(false); }
         };
         fetchAllData();
-    }, []);
+    }, [selectedDistrict]);
 
+    // Handle district selection
+    const handleDistrictChange = (districtName) => {
+        setSelectedDistrict(districtName);
+        if (!districtName) {
+            // Reset to state view
+            setMapCenter(UP_CENTER);
+            setMapZoom(UP_ZOOM);
+        } else {
+            const dist = upDistricts.find(d => d.name === districtName);
+            if (dist) {
+                setMapCenter([dist.lat, dist.lng]);
+                setMapZoom(dist.zoom || 12);
+            }
+        }
+    };
 
     const handleDownloadPDF = () => {
         try {
             const doc = new jsPDF();
-
-            // Title
             doc.setFontSize(18);
-            doc.text("City Governance Report - FY 2025-26", 14, 22);
-
-            doc.setFontSize(11);
-            doc.setTextColor(100);
+            const title = selectedDistrict
+                ? `${selectedDistrict} District Report - FY 2025-26`
+                : "Uttar Pradesh State Governance Report - FY 2025-26";
+            doc.text(title, 14, 22);
+            doc.setFontSize(11); doc.setTextColor(100);
             doc.text("Generated by JanSetu AI System", 14, 28);
-
-            // KPI Summary
             autoTable(doc, {
                 startY: 35,
                 head: [['Metric', 'Value', 'Status']],
@@ -130,198 +139,220 @@ const GovernanceDashboard = () => {
                     ['AI Verification Score', `${kpis?.verification_rate || 0}%`, 'Consistent'],
                     ['Citizen Satisfaction', `${kpis?.citizen_satisfaction || 0}/5.0`, 'Positive'],
                 ],
-                theme: 'grid',
-                headStyles: { fillColor: [0, 31, 63] }
+                theme: 'grid', headStyles: { fillColor: [43, 107, 255] }
             });
-
-            // Departments
             doc.text("Departmental Performance", 14, doc.lastAutoTable.finalY + 10);
             autoTable(doc, {
                 startY: doc.lastAutoTable.finalY + 15,
                 head: [['Department', 'Caseload', 'Efficiency']],
                 body: deptStats.map(d => [d.name, d.total, `${d.resolution_rate}%`]),
-                theme: 'striped',
-                headStyles: { fillColor: [22, 160, 133] }
+                theme: 'striped', headStyles: { fillColor: [46, 204, 113] }
             });
-
-            // Dummy Heatmap Data Section (as requested)
-            doc.text("Hotspot Analysis Data (Sample)", 14, doc.lastAutoTable.finalY + 10);
-            const dummyRows = mapData.slice(0, 15).map(d => [
-                d.category || 'Pothole',
-                d.priority || 'High',
-                d.location?.lat?.toFixed(4) || '28.6139',
-                d.location?.lng?.toFixed(4) || '77.2090'
-            ]);
-
-            autoTable(doc, {
-                startY: doc.lastAutoTable.finalY + 15,
-                head: [['Issue Type', 'Priority', 'Lat', 'Lng']],
-                body: dummyRows,
-                theme: 'plain',
-                styles: { fontSize: 8 }
-            });
-
-            doc.save("governance_report.pdf");
-        } catch (error) {
-            console.error("PDF Generation Error:", error);
-            alert("Failed to generate PDF. check console for details.");
-        }
+            doc.save(`governance_report${selectedDistrict ? '_' + selectedDistrict : ''}.pdf`);
+        } catch (err) { console.error("PDF error:", err); alert("PDF generation failed."); }
     };
 
-    if (loading) return <div className="min-h-screen flex items-center justify-center text-gray-500 font-medium">Loading Governance Data...</div>;
-
-
+    if (loading) return <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-secondary)' }}>Loading Governance Data...</div>;
 
     const radialData = aiMetrics ? [
-        { name: 'Category Accuracy', uv: aiMetrics.category_accuracy, fill: '#1e3a8a' }, // Navy
-        { name: 'Priority Precision', uv: aiMetrics.priority_precision, fill: '#ea580c' }, // Orange
-        { name: 'Vision Detection', uv: aiMetrics.vision_detection_rate, fill: '#15803d' } // Green
+        { name: 'Category Accuracy', uv: aiMetrics.category_accuracy, fill: '#2B6BFF' },
+        { name: 'Priority Precision', uv: aiMetrics.priority_precision, fill: '#e67e22' },
+        { name: 'Vision Detection', uv: aiMetrics.vision_detection_rate, fill: '#2ecc71' }
     ] : [];
 
-    return (
-        <div className="min-h-screen bg-[#f3f4f6] font-sans text-gray-900 pb-12">
+    const scopeLabel = selectedDistrict || 'Uttar Pradesh (State)';
 
-            {/* --- HEADER --- */}
-            <header className="bg-[#001f3f] text-white shadow-lg sticky top-0 z-40 border-b-4 border-yellow-500">
-                <div className="max-w-7xl mx-auto py-4 px-6 flex justify-between items-center">
+    return (
+        <div className="page-bg" style={{ minHeight: '100vh', paddingBottom: 80 }}>
+            {/* Header */}
+            <section style={{
+                background: 'var(--bg-secondary)', padding: '28px 0 24px',
+                borderBottom: '1px solid var(--border-light)'
+            }}>
+                <div className="container-js" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 16 }}>
                     <div>
-                        <div className="flex items-center gap-4">
-                            <img
-                                src="https://upload.wikimedia.org/wikipedia/commons/5/55/Emblem_of_India.svg"
-                                alt="Emblem"
-                                className="h-12 invert brightness-0 filter"
-                            />
-                            <div>
-                                <h1 className="text-xl md:text-2xl font-serif font-bold tracking-wide">City Governance Dashboard</h1>
-                                <p className="text-[10px] md:text-xs text-blue-200 uppercase tracking-widest">Office of the Municipal Commissioner • Executive View</p>
-                            </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 6 }}>
+                            <h1 style={{ fontSize: 24, marginBottom: 0 }}>State Governance Dashboard</h1>
+                            <span style={{
+                                fontSize: 11, fontWeight: 700, padding: '4px 14px', borderRadius: 20,
+                                background: selectedDistrict ? 'linear-gradient(135deg, #f97316, #ef4444)' : 'linear-gradient(135deg, #2B6BFF, #7c3aed)',
+                                color: 'white', letterSpacing: '0.04em'
+                            }}>
+                                {selectedDistrict ? `📍 ${selectedDistrict}` : '🏛️ Full State'}
+                            </span>
                         </div>
+                        <p style={{ fontSize: 13, margin: 0, color: 'var(--text-secondary)' }}>
+                            Executive Overview &amp; Analytics — <strong>{scopeLabel}</strong>
+                        </p>
                     </div>
-                    <div>
-                        <div className="text-right">
-                            <button
-                                onClick={handleDownloadPDF}
-                                className="bg-yellow-500 text-[#001f3f] text-xs font-bold uppercase tracking-widest px-4 py-2 rounded-sm hover:bg-yellow-400 transition"
+                    <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+                        {/* District Selector */}
+                        <div style={{ position: 'relative' }}>
+                            <select
+                                value={selectedDistrict}
+                                onChange={(e) => handleDistrictChange(e.target.value)}
+                                className="input-js"
+                                style={{
+                                    height: 40, fontSize: 13, fontWeight: 600, minWidth: 220,
+                                    paddingRight: 40, borderRadius: 12,
+                                    background: 'var(--surface)', cursor: 'pointer'
+                                }}
                             >
-                                ⬇ Download Report (PDF)
-                            </button>
+                                <option value="">🏛️ All Districts (State View)</option>
+                                {upDistricts.map(d => (
+                                    <option key={d.name} value={d.name}>📍 {d.name}</option>
+                                ))}
+                            </select>
                         </div>
+                        {selectedDistrict && (
+                            <button onClick={() => handleDistrictChange('')}
+                                style={{
+                                    padding: '8px 16px', borderRadius: 12, border: '1px solid var(--border-light)',
+                                    background: 'var(--surface)', color: 'var(--text-secondary)', fontWeight: 600,
+                                    fontSize: 12, cursor: 'pointer', fontFamily: 'var(--font-body)'
+                                }}>
+                                ↩ Reset to State
+                            </button>
+                        )}
+                        <button onClick={handleDownloadPDF} className="btn-primary" style={{ fontSize: 12, height: 40, padding: '0 20px' }}>
+                            ⬇ Download Report (PDF)
+                        </button>
                     </div>
                 </div>
-            </header>
+            </section>
 
-            <main className="max-w-7xl mx-auto px-6 py-8 space-y-8">
+            <div className="container-js" style={{ paddingTop: 32 }}>
+                {/* Current Scope Badge */}
+                <AnimatePresence mode="wait">
+                    <motion.div key={selectedDistrict || 'state'}
+                        initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 10 }}
+                        style={{
+                            display: 'flex', alignItems: 'center', gap: 10, marginBottom: 24,
+                            padding: '12px 20px', borderRadius: 16,
+                            background: selectedDistrict
+                                ? 'linear-gradient(135deg, rgba(249,115,22,0.08), rgba(239,68,68,0.05))'
+                                : 'linear-gradient(135deg, rgba(43,107,255,0.08), rgba(124,58,237,0.05))',
+                            border: `1px solid ${selectedDistrict ? 'rgba(249,115,22,0.15)' : 'rgba(43,107,255,0.12)'}`
+                        }}>
+                        <span style={{ fontSize: 20 }}>{selectedDistrict ? '📍' : '🗺️'}</span>
+                        <div>
+                            <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--text-primary)' }}>
+                                {selectedDistrict ? `${selectedDistrict} District View` : 'Uttar Pradesh — State-Level Overview'}
+                            </div>
+                            <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                                {selectedDistrict
+                                    ? 'Showing data specific to this district. Select another from the dropdown above.'
+                                    : `Aggregated data across all ${upDistricts.length} districts. Select a district to drill down.`
+                                }
+                            </div>
+                        </div>
+                    </motion.div>
+                </AnimatePresence>
 
-                {/* --- KPI SECTION --- */}
-                <div className="grid grid-cols-1 md:grid-cols-5 gap-6">
+                {/* KPI Cards */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 14, marginBottom: 32 }}>
                     {kpis && [
-                        { label: 'Total Complaints', value: kpis.total_complaints || 0, sub: 'City-wide', color: 'bg-white border-t-4 border-blue-900' },
-                        { label: 'Resolution Rate', value: `${kpis.resolution_rate || 0}%`, sub: 'Target: 85%', color: 'bg-white border-t-4 border-green-600' },
-                        { label: 'Verification Score', value: `${kpis.verification_rate || 0}%`, sub: 'AI Validated', color: 'bg-white border-t-4 border-teal-600' },
-                        { label: 'Citizen Rating', value: `${kpis.citizen_satisfaction || 0}/5.0`, sub: 'Public Trust', color: 'bg-white border-t-4 border-yellow-500' },
-                        { label: 'Avg Resolution Time', value: `${kpis.avg_resolution_time_hours || 0}h`, sub: 'Efficiency', color: 'bg-white border-t-4 border-purple-800' },
-                    ].map((kpi, idx) => (
-                        <motion.div
-                            key={idx}
-                            initial={{ opacity: 0, y: 10 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            transition={{ delay: idx * 0.1 }}
-                            className={`p-6 rounded-sm shadow-sm hover:shadow-md transition-shadow ${kpi.color}`}
-                        >
-                            <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wider mb-2">{kpi.label}</p>
-                            <h3 className="text-3xl font-serif font-extrabold text-[#001f3f]">{kpi.value}</h3>
-                            <p className="text-[10px] text-gray-400 mt-1 uppercase tracking-widest">{kpi.sub}</p>
+                        { label: 'Total Complaints', value: kpis.total_complaints || 0, sub: selectedDistrict || 'State-wide', icon: '📊', color: 'var(--accent)' },
+                        { label: 'Resolution Rate', value: `${kpis.resolution_rate || 0}%`, sub: 'Target: 85%', icon: '✅', color: 'var(--color-success)' },
+                        { label: 'Verification', value: `${kpis.verification_rate || 0}%`, sub: 'AI Validated', icon: '🤖', color: '#00838f' },
+                        { label: 'Citizen Rating', value: `${kpis.citizen_satisfaction || 0}/5`, sub: 'Public Trust', icon: '⭐', color: '#f1c40f' },
+                        { label: 'Avg Time', value: `${kpis.avg_resolution_time_hours || 0}h`, sub: 'Efficiency', icon: '⏱️', color: '#8e44ad' }
+                    ].map((k, i) => (
+                        <motion.div key={i} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
+                            transition={{ delay: i * 0.06 }} className="card-js" style={{ padding: 20, textAlign: 'center' }}>
+                            <div style={{ fontSize: 22, marginBottom: 4 }}>{k.icon}</div>
+                            <div style={{ fontSize: 24, fontWeight: 700, fontFamily: 'var(--font-heading)', color: k.color }}>{k.value}</div>
+                            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.06em', marginTop: 2 }}>{k.label}</div>
+                            <div style={{ fontSize: 10, color: 'var(--text-secondary)', marginTop: 2 }}>{k.sub}</div>
                         </motion.div>
                     ))}
                 </div>
 
-                {/* --- HOTSPOT ANALYSIS --- */}
-                <div className="bg-white p-6 rounded-sm shadow-sm border border-gray-200">
-                    <h3 className="text-lg font-serif font-bold text-[#001f3f] mb-4 border-b pb-2 flex items-center gap-2">
-                        <span>🔥</span> Complaint Density & Hotspots
-                    </h3>
-                    {/* B&W Map Style REMOVED - Restoring Colors */}
-                    <div className="h-[400px] w-full rounded-sm overflow-hidden border border-gray-300 relative z-0">
-                        <div className="absolute inset-0 z-0">
-                            <MapContainer center={[28.6139, 77.2090]} zoom={11} scrollWheelZoom={false} style={{ height: '100%', width: '100%' }}>
-                                <TileLayer
-                                    attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-                                    url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-                                />
-                                {mapData
-                                    .filter(c => c.location && c.location.lat && c.location.lng)
-                                    .map(c => {
-                                        const isPriority = c.priority === 'High';
-                                        // Colors: Red for High, Orange for Medium, Green for Low
-                                        const color = isPriority ? '#ef4444' : (c.priority === 'Medium' ? '#f97316' : '#22c55e');
-                                        const radius = isPriority ? 20 : 10;
-                                        return (
-                                            <CircleMarker
-                                                key={c._id}
-                                                center={[c.location.lat, c.location.lng]}
-                                                pathOptions={{ color: color, fillColor: color, fillOpacity: 0.6, weight: 0 }}
-                                                radius={radius}
-                                            >
-                                                <Popup>
-                                                    <div className="text-xs font-bold">{c.category} ({c.priority})</div>
-                                                </Popup>
-                                            </CircleMarker>
-                                        );
-                                    })
-                                }
-                            </MapContainer>
-                        </div>
+                {/* Hotspot Map */}
+                <div className="card-js" style={{ padding: 24, marginBottom: 32 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                        <h3 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>
+                            🔥 Complaint Density & Hotspots {selectedDistrict ? `— ${selectedDistrict}` : '— Uttar Pradesh'}
+                        </h3>
+                        <span style={{
+                            fontSize: 11, fontWeight: 600, padding: '4px 12px', borderRadius: 20,
+                            background: 'var(--bg-secondary)', color: 'var(--text-secondary)'
+                        }}>
+                            {mapData.filter(c => c.location?.lat && c.location?.lng).length} data points
+                        </span>
+                    </div>
+                    <div style={{ height: 420, borderRadius: 16, overflow: 'hidden', border: '1px solid var(--border-light)' }}>
+                        <MapContainer center={mapCenter} zoom={mapZoom} scrollWheelZoom={false} style={{ height: '100%', width: '100%' }}>
+                            <MapRecenter center={mapCenter} zoom={mapZoom} />
+                            <TileLayer
+                                attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+                                url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                            />
+                            {mapData.filter(c => c.location?.lat && c.location?.lng).map(c => {
+                                const isPriority = c.priority === 'High';
+                                const color = isPriority ? '#e74c3c' : (c.priority === 'Medium' ? '#f97316' : '#22c55e');
+                                return (
+                                    <CircleMarker key={c._id} center={[c.location.lat, c.location.lng]}
+                                        pathOptions={{ color, fillColor: color, fillOpacity: 0.6, weight: 0 }}
+                                        radius={isPriority ? 18 : 10}>
+                                        <Popup><div style={{ fontSize: 12, fontWeight: 600 }}>{c.category} ({c.priority})</div></Popup>
+                                    </CircleMarker>
+                                );
+                            })}
+                        </MapContainer>
                     </div>
                 </div>
 
-                {/* --- STRATEGIC INSIGHTS ROW 1 --- */}
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-
-                    {/* Department Performance Card */}
-                    <div className="lg:col-span-2 bg-white p-8 rounded-sm shadow-sm border border-gray-200">
-                        <div className="flex justify-between items-end mb-6 border-b border-gray-100 pb-4">
+                {/* Dept Performance + Trend */}
+                <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 20, marginBottom: 32 }}>
+                    {/* Department Table */}
+                    <div className="card-js" style={{ padding: 0, overflow: 'hidden' }}>
+                        <div style={{ padding: '20px 24px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--border-light)' }}>
                             <div>
-                                <h3 className="text-lg font-serif font-bold text-[#001f3f]">Department Performance Scorecard</h3>
-                                <p className="text-[10px] text-gray-500 uppercase tracking-widest mt-1">Monthly Efficiency Report</p>
+                                <h3 style={{ fontSize: 16, fontWeight: 600 }}>Department Scorecard</h3>
+                                <p style={{ fontSize: 11, color: 'var(--text-secondary)', margin: 0 }}>
+                                    {selectedDistrict ? `${selectedDistrict} District Report` : 'State-Wide Monthly Report'}
+                                </p>
                             </div>
-                            <button
-                                onClick={handleDownloadPDF}
-                                className="text-[#001f3f] text-xs font-bold uppercase tracking-wider border border-gray-200 px-3 py-1 hover:bg-gray-50 transition"
-                            >
-                                Download PDF
-                            </button>
                         </div>
-                        <div className="overflow-x-auto">
-                            <table className="w-full text-left text-sm">
-                                <thead className="bg-[#001f3f] text-white uppercase font-bold text-[10px] tracking-wider">
-                                    <tr>
-                                        <th className="px-4 py-3">Department</th>
-                                        <th className="px-4 py-3">Caseload</th>
-                                        <th className="px-4 py-3">Resolution Rate</th>
-                                        <th className="px-4 py-3">Performance Status</th>
+                        <div style={{ overflowX: 'auto' }}>
+                            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                                <thead>
+                                    <tr style={{ background: 'var(--bg-secondary)' }}>
+                                        {['Department', 'Caseload', 'Resolution', 'Status'].map(h => (
+                                            <th key={h} style={{
+                                                padding: '14px 20px', textAlign: 'left', fontSize: 11, fontWeight: 700,
+                                                color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.06em'
+                                            }}>{h}</th>
+                                        ))}
                                     </tr>
                                 </thead>
-                                <tbody className="divide-y divide-gray-100">
+                                <tbody>
                                     {deptStats.map(dept => (
-                                        <tr key={dept.name} className="hover:bg-gray-50 transition">
-                                            <td className="px-4 py-4 font-bold text-gray-800 border-l-4 border-transparent hover:border-blue-900 transition-all">{dept.name}</td>
-                                            <td className="px-4 py-4 font-mono text-gray-600">{dept.total}</td>
-                                            <td className="px-4 py-4">
-                                                <div className="flex items-center gap-2">
-                                                    <div className="w-24 h-2 bg-gray-200 rounded-sm overflow-hidden">
-                                                        <div className={`h-full ${dept.resolution_rate > 80 ? 'bg-green-600' : dept.resolution_rate > 50 ? 'bg-yellow-500' : 'bg-red-600'}`} style={{ width: `${dept.resolution_rate}%` }}></div>
+                                        <tr key={dept.name} style={{ borderBottom: '1px solid var(--border-light)', transition: 'background 0.15s' }}
+                                            onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-secondary)'}
+                                            onMouseLeave={e => e.currentTarget.style.background = ''}>
+                                            <td style={{ padding: '14px 20px', fontWeight: 600 }}>{dept.name}</td>
+                                            <td style={{ padding: '14px 20px', color: 'var(--text-secondary)' }}>{dept.total}</td>
+                                            <td style={{ padding: '14px 20px' }}>
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                                    <div style={{ width: 80, height: 6, background: 'var(--bg-secondary)', borderRadius: 3, overflow: 'hidden' }}>
+                                                        <div style={{
+                                                            height: '100%', width: `${dept.resolution_rate}%`, borderRadius: 3,
+                                                            background: dept.resolution_rate > 80 ? 'var(--color-success)' : dept.resolution_rate > 50 ? '#f1c40f' : 'var(--color-danger)'
+                                                        }} />
                                                     </div>
-                                                    <span className="text-xs font-mono font-bold">{dept.resolution_rate}%</span>
+                                                    <span style={{ fontSize: 12, fontWeight: 700 }}>{dept.resolution_rate}%</span>
                                                 </div>
                                             </td>
-                                            <td className="px-4 py-4">
-                                                {dept.resolution_rate > 80 ? (
-                                                    <span className="inline-block px-2 py-0.5 bg-green-100 text-green-800 text-[10px] font-bold uppercase tracking-wider border border-green-200 rounded-sm">Excellent</span>
-                                                ) : dept.resolution_rate > 50 ? (
-                                                    <span className="inline-block px-2 py-0.5 bg-yellow-100 text-yellow-800 text-[10px] font-bold uppercase tracking-wider border border-yellow-200 rounded-sm">Average</span>
-                                                ) : (
-                                                    <span className="inline-block px-2 py-0.5 bg-red-100 text-red-800 text-[10px] font-bold uppercase tracking-wider border border-red-200 rounded-sm">Critical</span>
-                                                )}
+                                            <td style={{ padding: '14px 20px' }}>
+                                                <span style={{
+                                                    fontSize: 11, fontWeight: 700, padding: '3px 12px', borderRadius: 20,
+                                                    background: dept.resolution_rate > 80 ? '#e6f4ea' : dept.resolution_rate > 50 ? '#fff7ed' : '#fef2f2',
+                                                    color: dept.resolution_rate > 80 ? '#2ecc71' : dept.resolution_rate > 50 ? '#e67e22' : '#e74c3c'
+                                                }}>
+                                                    {dept.resolution_rate > 80 ? 'Excellent' : dept.resolution_rate > 50 ? 'Average' : 'Critical'}
+                                                </span>
                                             </td>
                                         </tr>
                                     ))}
@@ -330,82 +361,86 @@ const GovernanceDashboard = () => {
                         </div>
                     </div>
 
-                    {/* Complaint Trend Chart */}
-                    <div className="bg-white p-8 rounded-sm shadow-sm border border-gray-200">
-                        <h3 className="text-lg font-serif font-bold text-[#001f3f] mb-2">Complaint Volume Trend</h3>
-                        <p className="text-[10px] text-gray-500 uppercase tracking-widest mb-6 border-b border-gray-100 pb-4">6-Month Trajectory</p>
-                        <div className="h-64">
+                    {/* Trend Area Chart */}
+                    <div className="card-js" style={{ padding: 24 }}>
+                        <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 4 }}>Complaint Trend</h3>
+                        <p style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 20 }}>
+                            {selectedDistrict ? `${selectedDistrict} — 6-Month` : 'State-Wide 6-Month Trajectory'}
+                        </p>
+                        <div style={{ height: 240 }}>
                             <ResponsiveContainer width="100%" height="100%">
                                 <AreaChart data={trends}>
                                     <defs>
                                         <linearGradient id="colorComplaints" x1="0" y1="0" x2="0" y2="1">
-                                            <stop offset="5%" stopColor="#1e3a8a" stopOpacity={0.8} />
-                                            <stop offset="95%" stopColor="#1e3a8a" stopOpacity={0} />
+                                            <stop offset="5%" stopColor="#2B6BFF" stopOpacity={0.7} />
+                                            <stop offset="95%" stopColor="#2B6BFF" stopOpacity={0} />
                                         </linearGradient>
                                         <linearGradient id="colorResolved" x1="0" y1="0" x2="0" y2="1">
-                                            <stop offset="5%" stopColor="#10b981" stopOpacity={0.8} />
-                                            <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
+                                            <stop offset="5%" stopColor="#2ecc71" stopOpacity={0.7} />
+                                            <stop offset="95%" stopColor="#2ecc71" stopOpacity={0} />
                                         </linearGradient>
                                     </defs>
-                                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e5e7eb" />
-                                    <XAxis dataKey="month" axisLine={false} tickLine={false} tick={{ fill: '#6b7280', fontSize: 10, fontWeight: 'bold' }} />
-                                    <YAxis axisLine={false} tickLine={false} tick={{ fill: '#6b7280', fontSize: 10 }} />
-                                    <Tooltip contentStyle={{ borderRadius: '0px', border: '1px solid #e5e7eb', boxShadow: 'none' }} />
-                                    <Area type="monotone" dataKey="complaints" stroke="#1e3a8a" fillOpacity={1} fill="url(#colorComplaints)" strokeWidth={2} name="Total Complaints" />
-                                    <Area type="monotone" dataKey="resolved" stroke="#10b981" fillOpacity={1} fill="url(#colorResolved)" strokeWidth={2} name="Resolved" />
+                                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(14,26,51,0.06)" />
+                                    <XAxis dataKey="month" axisLine={false} tickLine={false} tick={{ fill: '#4A5B7A', fontSize: 10, fontWeight: 600 }} />
+                                    <YAxis axisLine={false} tickLine={false} tick={{ fill: '#4A5B7A', fontSize: 10 }} />
+                                    <Tooltip contentStyle={{ borderRadius: 12, border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} />
+                                    <Area type="monotone" dataKey="complaints" stroke="#2B6BFF" fillOpacity={1} fill="url(#colorComplaints)" strokeWidth={2} name="Total" />
+                                    <Area type="monotone" dataKey="resolved" stroke="#2ecc71" fillOpacity={1} fill="url(#colorResolved)" strokeWidth={2} name="Resolved" />
                                 </AreaChart>
                             </ResponsiveContainer>
                         </div>
                     </div>
                 </div>
 
-                {/* --- AI TRANSPARENCY & TRUST --- */}
-                <div className="bg-[#001f3f] text-white p-8 rounded-sm shadow-xl overflow-hidden relative border-t-8 border-yellow-500">
-                    {/* Decorative bg */}
-                    <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/cubes.png')] opacity-10"></div>
-                    <div className="absolute top-0 right-0 w-64 h-full bg-gradient-to-l from-[#000000] to-transparent opacity-50"></div>
-
-                    <div className="relative z-10 grid grid-cols-1 md:grid-cols-2 gap-12 items-center">
-                        <div>
-                            <div className="inline-block px-3 py-1 bg-yellow-500 text-[#001f3f] rounded-sm text-[10px] font-bold uppercase tracking-widest mb-4">AI Governance Protocol</div>
-                            <h2 className="text-3xl font-serif font-bold mb-4">Artificial Intelligence Performance Monitor</h2>
-                            <p className="text-blue-100 mb-8 max-w-md leading-relaxed text-sm font-light">
-                                Real-time oversight of the automated decision-making engines. Monitors accuracy rates for classification, prioritization, and visual verification systems to ensure public accountability.
+                {/* AI Transparency Section */}
+                <div className="card-js" style={{
+                    padding: 0, overflow: 'hidden', background: 'var(--text-primary)', color: 'white', borderRadius: 24
+                }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 0 }}>
+                        <div style={{ padding: 40 }}>
+                            <span style={{
+                                fontSize: 11, fontWeight: 700, padding: '4px 14px', borderRadius: 20,
+                                background: 'var(--accent)', color: 'white', letterSpacing: '0.06em',
+                                display: 'inline-block', marginBottom: 20
+                            }}>AI Governance Protocol</span>
+                            <h2 style={{ fontSize: 26, fontFamily: 'var(--font-heading)', fontWeight: 700, marginBottom: 12, lineHeight: 1.3 }}>
+                                AI Performance Monitor
+                            </h2>
+                            <p style={{ fontSize: 14, color: 'rgba(255,255,255,0.6)', lineHeight: 1.7, marginBottom: 28, maxWidth: 400 }}>
+                                Real-time oversight of automated decision-making engines ensuring public accountability.
+                                {selectedDistrict ? ` Showing metrics for ${selectedDistrict}.` : ' State-wide aggregated view.'}
                             </p>
-
-                            <div className="grid grid-cols-2 gap-6">
-                                <div className="bg-white/5 p-4 rounded-sm border-l-2 border-green-500">
-                                    <p className="text-blue-300 text-[10px] uppercase font-bold tracking-widest mb-1">Category Accuracy</p>
-                                    <p className="text-2xl font-mono font-bold text-white">{aiMetrics?.category_accuracy}%</p>
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                                <div style={{ padding: 16, background: 'rgba(255,255,255,0.06)', borderRadius: 16, borderLeft: '3px solid var(--color-success)' }}>
+                                    <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.5)', textTransform: 'uppercase', marginBottom: 4 }}>Category Accuracy</div>
+                                    <div style={{ fontSize: 22, fontWeight: 700 }}>{aiMetrics?.category_accuracy}%</div>
                                 </div>
-                                <div className="bg-white/5 p-4 rounded-sm border-l-2 border-yellow-500">
-                                    <p className="text-blue-300 text-[10px] uppercase font-bold tracking-widest mb-1">Mismatches Flagged</p>
-                                    <p className="text-2xl font-mono font-bold text-white">{aiMetrics?.mismatches_flagged}</p>
-                                    <p className="text-[10px] text-yellow-500 mt-1 uppercase">Requires Review</p>
+                                <div style={{ padding: 16, background: 'rgba(255,255,255,0.06)', borderRadius: 16, borderLeft: '3px solid #f1c40f' }}>
+                                    <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.5)', textTransform: 'uppercase', marginBottom: 4 }}>Mismatches</div>
+                                    <div style={{ fontSize: 22, fontWeight: 700 }}>{aiMetrics?.mismatches_flagged}</div>
+                                    <div style={{ fontSize: 10, color: '#f1c40f', marginTop: 2 }}>Requires Review</div>
                                 </div>
                             </div>
                         </div>
-
-                        <div className="h-64 bg-white/5 rounded-sm border border-white/10 p-4 relative">
-                            <h4 className="absolute top-4 left-4 text-[10px] text-white/50 uppercase tracking-widest font-bold">Model Performance Metrics</h4>
-                            <ResponsiveContainer width="100%" height="100%">
-                                <RadialBarChart cx="50%" cy="50%" innerRadius="30%" outerRadius="100%" barSize={20} data={radialData}>
-                                    <RadialBar
-                                        minAngle={15}
-                                        label={{ position: 'insideStart', fill: '#fff', fontSize: '10px', fontWeight: 'bold' }}
-                                        background
-                                        clockWise
-                                        dataKey="uv"
-                                    />
-                                    <Legend iconSize={8} layout="vertical" verticalAlign="middle" wrapperStyle={{ color: '#bfdbfe', fontSize: '11px', fontFamily: 'monospace' }} />
-                                </RadialBarChart>
-                            </ResponsiveContainer>
+                        <div style={{ padding: 24, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(255,255,255,0.03)' }}>
+                            <div style={{ width: '100%', height: 260 }}>
+                                <ResponsiveContainer width="100%" height="100%">
+                                    <RadialBarChart cx="50%" cy="50%" innerRadius="30%" outerRadius="100%" barSize={18} data={radialData}>
+                                        <RadialBar
+                                            minAngle={15}
+                                            label={{ position: 'insideStart', fill: '#fff', fontSize: 10, fontWeight: 700 }}
+                                            background clockWise dataKey="uv"
+                                        />
+                                        <Legend iconSize={8} layout="vertical" verticalAlign="middle"
+                                            wrapperStyle={{ color: 'rgba(255,255,255,0.7)', fontSize: 11, fontFamily: 'var(--font-body)' }} />
+                                    </RadialBarChart>
+                                </ResponsiveContainer>
+                            </div>
                         </div>
                     </div>
                 </div>
-
-            </main >
-        </div >
+            </div>
+        </div>
     );
 };
 

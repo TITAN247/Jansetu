@@ -1,6 +1,6 @@
 from flask import Blueprint, request, jsonify
 from database.mongo import get_db
-from database.schemas import create_user, create_worker
+from database.schemas import create_user, create_worker, create_dept_officer
 import jwt
 import datetime
 from config import Config
@@ -19,10 +19,23 @@ def register():
     password = data['password'] # In real app, hash this!
     role = data.get('role', 'Citizen') 
     
+    # ===== PASSWORD FORMAT VALIDATION =====
+    import re
+    if len(password) < 8:
+        return jsonify({'error': 'Password must be at least 8 characters long.'}), 400
+    if not re.search(r'[A-Z]', password):
+        return jsonify({'error': 'Password must contain at least one uppercase letter.'}), 400
+    if not re.search(r'[a-z]', password):
+        return jsonify({'error': 'Password must contain at least one lowercase letter.'}), 400
+    if not re.search(r'[0-9]', password):
+        return jsonify({'error': 'Password must contain at least one digit.'}), 400
+    if not re.search(r'[!@#$%^&*()_+\-=\[\]{};\':"\\|,.<>\/?]', password):
+        return jsonify({'error': 'Password must contain at least one special character (!@#$%^&*).'}), 400
+    
     print(f"[AUTH REGISTER] Attempting to register {email} as {role}")
 
     # Check if user exists in either collection
-    if db.users.find_one({'email': email}) or db.workers.find_one({'email': email}):
+    if db.users.find_one({'email': email}) or db.workers.find_one({'email': email}) or db.dept_officers.find_one({'email': email}):
         print(f"[AUTH REGISTER] User {email} already exists.")
         return jsonify({'error': 'User with this email already exists'}), 400
     
@@ -40,15 +53,39 @@ def register():
         user_id = str(result.inserted_id)
         collection = 'workers'
         
+    elif role == 'dept_officer':
+        dept = data.get('department')
+        new_officer = create_dept_officer(
+            name=data.get('name', 'Dept Officer'),
+            email=email,
+            department_id=dept,
+            password_hash=password,
+            role='dept_officer'
+        )
+        result = db.dept_officers.insert_one(new_officer)
+        user_id = str(result.inserted_id)
+        collection = 'dept_officers'
+
     elif role in ['admin', 'governance']:
-        # Create Admin/Governance Profile
-        # Schema similar to User but with higher privileges
+        # ===== ACCESS CODE VERIFICATION =====
+        access_code = data.get('access_code', '').strip().upper()
+        from routes.admin_routes import VALID_ADMIN_CODES
+        if not access_code or access_code not in VALID_ADMIN_CODES:
+            return jsonify({'error': 'Invalid or missing access code. Only developer-generated codes are accepted.'}), 403
+        
+        # Verify code matches the requested role
+        if VALID_ADMIN_CODES[access_code] != role:
+            return jsonify({'error': f'This access code is for {VALID_ADMIN_CODES[access_code]} role, not {role}.'}), 403
+
+        # Create Admin/Governance Profile with district
         new_admin = {
             "name": data.get('name', 'Official'),
             "email": email,
             "password_hash": password,
             "role": role,
             "department": data.get('department', 'Administration'),
+            "district": data.get('district', ''),
+            "access_code_used": access_code,
             "created_at": datetime.datetime.utcnow()
         }
         result = db.admins.insert_one(new_admin)
@@ -66,6 +103,17 @@ def register():
         user_id = str(result.inserted_id)
         collection = 'users'
     
+    # Map any guest complaints (submitted with this email before registration)
+    try:
+        mapped = db.complaints.update_many(
+            {'email': email, 'user_id': 'Anonymous'},
+            {'$set': {'user_id': user_id}}
+        )
+        if mapped.modified_count > 0:
+            print(f"[AUTH REGISTER] Mapped {mapped.modified_count} guest complaint(s) to user {user_id}")
+    except Exception as e:
+        print(f"[AUTH REGISTER] Email mapping error: {e}")
+
     print(f"[AUTH REGISTER] Success: {user_id} in {collection}")
     
     return jsonify({
@@ -88,6 +136,9 @@ def login():
         if not data or 'email' not in data or 'password' not in data:
             print("Error: Missing credentials in payload")
             return jsonify({'error': 'Missing credentials'}), 400
+        # context tells us from which portal the login is initiated
+        # e.g. 'public' (citizen/worker/local authority) vs 'admin_portal'
+        context = data.get('context', 'public')
         
         email = data['email']
         password = data['password']
@@ -106,15 +157,20 @@ def login():
             role = 'worker'
             print(f"Search Workers Result: {user is not None}")
 
-        # 3. Check Admins (New)
+         # 3. Check Dept Officers
         if not user:
-             print("User not found in 'workers', checking 'admins'...")
-             # For now, let's treat specific hardcoded emails as admins if DB is empty, 
-             # OR check an 'admins' collection. 
-             # Let's check 'admins' collection first.
+            print("User not found in 'workers', checking 'dept_officers'...")
+            user = db.dept_officers.find_one({'email': email})
+            if user:
+                role = 'dept_officer'
+            print(f"Search Dept Officers Result: {user is not None}")
+
+         # 4. Check Admins
+        if not user:
+             print("User not found in 'dept_officers', checking 'admins'...")
              user = db.admins.find_one({'email': email})
              if user:
-                 role = user.get('role', 'admin') # Could be 'admin' or 'governance'
+                 role = user.get('role', 'admin')
              print(f"Search Admins Result: {user is not None}")
              
         # 4. Fallback Hardcoded Admin (Emergency Access for Demo)
@@ -151,6 +207,17 @@ def login():
             # Simple string comparison (for hackathon/demo)
             if (stored_hash and stored_hash == password) or (stored_pass and stored_pass == password):
                 print(f"Success: Password match for {email} ({role})")
+
+                # Enforce role-wise portal access:
+                #  - Administration roles ('admin', 'governance') must use the admin portal
+                #  - Citizen / worker / dept_officer must NOT use the admin portal
+                if context == 'public' and role in ['admin', 'governance']:
+                    print(f"[AUTH LOGIN] Admin-type role attempted login via public portal: {email}")
+                    return jsonify({'error': 'Administration roles must login via the administration portal.'}), 403
+
+                if context == 'admin_portal' and role not in ['admin', 'governance']:
+                    print(f"[AUTH LOGIN] Non-admin role attempted login via admin portal: {email} ({role})")
+                    return jsonify({'error': 'Only administration roles can login from this portal.'}), 403
                 
                 # Ensure _id is string
                 user_id = str(user['_id'])
@@ -162,6 +229,17 @@ def login():
                 }, Config.SECRET_KEY, algorithm="HS256")
                 print("Token generated.")
 
+                # Map any remaining guest complaints to this user
+                try:
+                    mapped = db.complaints.update_many(
+                        {'email': user['email'], 'user_id': 'Anonymous'},
+                        {'$set': {'user_id': user_id}}
+                    )
+                    if mapped.modified_count > 0:
+                        print(f"[AUTH LOGIN] Mapped {mapped.modified_count} guest complaint(s) to {user_id}")
+                except Exception as e:
+                    print(f"[AUTH LOGIN] Email mapping error: {e}")
+
                 return jsonify({
                     'message': 'Login successful',
                     'token': token,
@@ -172,7 +250,8 @@ def login():
                         'role': role,
                         # Fix: Workers use 'department_id', others use 'department'
                         # Frontend expects 'department' so we normalize it here
-                        'department': user.get('department_id') or user.get('department')
+                        'department': user.get('department_id') or user.get('department'),
+                        'district': user.get('district', '')
                     }
                 }), 200
             else:

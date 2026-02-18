@@ -1,173 +1,207 @@
-import React, { useEffect, useState } from 'react';
-import { getAllComplaints } from '../services/api';
+import React, { useEffect, useState, useMemo } from 'react';
+import { getAllComplaints, overrideComplaintStatus, adminReassign, getUPDistricts } from '../services/api';
 import { Link } from 'react-router-dom';
 import StatusTracker from '../components/StatusTracker';
 import { motion, AnimatePresence } from 'framer-motion';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from 'recharts';
-import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
+import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
+import axios from 'axios';
 
-// Fix for default marker icon
 import icon from 'leaflet/dist/images/marker-icon.png';
 import iconShadow from 'leaflet/dist/images/marker-shadow.png';
 
-let DefaultIcon = L.icon({
-    iconUrl: icon,
-    shadowUrl: iconShadow,
-    iconSize: [25, 41],
-    iconAnchor: [12, 41]
-});
-
+let DefaultIcon = L.icon({ iconUrl: icon, shadowUrl: iconShadow, iconSize: [25, 41], iconAnchor: [12, 41] });
 L.Marker.prototype.options.icon = DefaultIcon;
+
+// Helper: recenter map
+function ChangeView({ center, zoom }) {
+    const map = useMap();
+    map.setView(center, zoom);
+    return null;
+}
+
+const API_URL = 'http://localhost:5000/api';
 
 const AdminDashboard = () => {
     const [complaints, setComplaints] = useState([]);
     const [loading, setLoading] = useState(true);
     const [selectedComplaint, setSelectedComplaint] = useState(null);
     const [filterStatus, setFilterStatus] = useState('All');
-    const [searchTerm, setSearchTerm] = useState('');
+    const [searchRefId, setSearchRefId] = useState('');
+    const [dateFrom, setDateFrom] = useState('');
+    const [dateTo, setDateTo] = useState('');
+    const [interventionTarget, setInterventionTarget] = useState(null);
+    const [overrideStatus, setOverrideStatus] = useState('');
+    const [adminNote, setAdminNote] = useState('');
+    const [reassignDept, setReassignDept] = useState('');
+    const [actionLoading, setActionLoading] = useState(false);
+    const [successMsg, setSuccessMsg] = useState('');
+
+    // District-specific
+    const user = useMemo(() => {
+        try { return JSON.parse(localStorage.getItem('user')); } catch { return null; }
+    }, []);
+    const adminDistrict = user?.district || '';
+    const [districtCoords, setDistrictCoords] = useState(null);
 
     useEffect(() => {
-        fetchData();
-    }, []);
+        // Fetch district coordinates
+        const fetchDistricts = async () => {
+            try {
+                const data = await getUPDistricts();
+                if (adminDistrict && Array.isArray(data)) {
+                    const match = data.find(d => d.name === adminDistrict);
+                    if (match) setDistrictCoords({ lat: match.lat, lng: match.lng, zoom: match.zoom });
+                }
+            } catch { /* ignore */ }
+        };
+        fetchDistricts();
+    }, [adminDistrict]);
+
+    const handleOverride = async () => {
+        if (!interventionTarget || !overrideStatus) return;
+        setActionLoading(true);
+        try {
+            await overrideComplaintStatus(interventionTarget._id, overrideStatus, adminNote);
+            setSuccessMsg(`Status overridden to ${overrideStatus}`);
+            setInterventionTarget(null); setOverrideStatus(''); setAdminNote('');
+            setTimeout(() => setSuccessMsg(''), 3000);
+            fetchData();
+        } catch (err) { alert(err.response?.data?.error || 'Override failed'); }
+        finally { setActionLoading(false); }
+    };
+
+    const handleReassignDept = async () => {
+        if (!interventionTarget || !reassignDept) return;
+        setActionLoading(true);
+        try {
+            await adminReassign(interventionTarget._id, reassignDept, null, adminNote);
+            setSuccessMsg(`Reassigned to ${reassignDept}`);
+            setInterventionTarget(null); setReassignDept(''); setAdminNote('');
+            setTimeout(() => setSuccessMsg(''), 3000);
+            fetchData();
+        } catch (err) { alert(err.response?.data?.error || 'Reassignment failed'); }
+        finally { setActionLoading(false); }
+    };
+
+    useEffect(() => { fetchData(); }, []);
 
     const fetchData = async () => {
         try {
-            const data = await getAllComplaints();
-            if (Array.isArray(data)) {
-                setComplaints(data.slice().reverse()); // Reverse for latest first
-            } else {
-                console.error("Expected array but got:", data);
-                setComplaints([]);
-            }
-        } catch (error) {
-            console.error("Error fetching data:", error);
-            setComplaints([]);
-        } finally {
-            setLoading(false);
-        }
+            // Use query params for server-side filtering
+            const params = new URLSearchParams();
+            if (dateFrom) params.append('date_from', dateFrom);
+            if (dateTo) params.append('date_to', dateTo);
+            if (searchRefId) params.append('ref_id', searchRefId);
+            if (filterStatus !== 'All') params.append('status', filterStatus);
+
+            const token = localStorage.getItem('token');
+            const response = await axios.get(`${API_URL}/admin/all?${params.toString()}`, {
+                headers: { Authorization: `Bearer ${token}` }
+            });
+            setComplaints(Array.isArray(response.data) ? response.data : []);
+        } catch { setComplaints([]); }
+        finally { setLoading(false); }
     };
 
-    // --- Stats Calculation ---
+    // Refetch when filters change (debounced for typing)
+    useEffect(() => {
+        const timer = setTimeout(() => { fetchData(); }, 400);
+        return () => clearTimeout(timer);
+    }, [dateFrom, dateTo, searchRefId, filterStatus]);
+
     const stats = {
         total: complaints.length,
         pending: complaints.filter(c => ['Submitted', 'Assigned', 'In Progress'].includes(c.status)).length,
         highPriority: complaints.filter(c => c.priority === 'High').length,
         resolved: complaints.filter(c => c.status === 'Resolved').length,
-        verified: complaints.filter(c => c.status === 'Verified').length
+        verified: complaints.filter(c => c.status === 'Verified').length,
+        reopened: complaints.filter(c => c.status === 'Reopened').length
     };
 
-    // --- Department Stats for Chart ---
-    const deptStats = complaints.reduce((acc, curr) => {
-        const dept = curr.department || 'Unassigned';
-        if (!acc[dept]) acc[dept] = 0;
-        acc[dept]++;
-        return acc;
-    }, {});
-    const chartData = Object.keys(deptStats).map(key => ({ name: key, count: deptStats[key] }));
+    const deptStats = complaints.reduce((acc, c) => { const d = c.department || 'N/A'; acc[d] = (acc[d] || 0) + 1; return acc; }, {});
+    const chartData = Object.keys(deptStats).map(k => ({ name: k, count: deptStats[k] }));
 
-    // --- Filtering ---
-    const filteredComplaints = complaints.filter(c => {
-        const matchesStatus = filterStatus === 'All' || c.status === filterStatus;
-        // Handle Schema Evolution: 'complaint_text' (New) vs 'text' (Legacy)
-        const text = c.complaint_text || c.text || '';
-        const category = c.category || '';
-        const id = c._id || '';
+    const mapCenter = districtCoords ? [districtCoords.lat, districtCoords.lng] : [28.6139, 77.2090];
+    const mapZoom = districtCoords ? districtCoords.zoom : 11;
 
-        const matchesSearch = text.toLowerCase().includes(searchTerm.toLowerCase()) ||
-            category.toLowerCase().includes(searchTerm.toLowerCase()) ||
-            id.includes(searchTerm);
-        return matchesStatus && matchesSearch;
-    });
-
-    const getPriorityBadge = (p) => {
-        const colors = { High: 'bg-red-50 text-red-800 border-red-200', Medium: 'bg-orange-50 text-orange-800 border-orange-200', Low: 'bg-green-50 text-green-800 border-green-200' };
-        return <span className={`px-2 py-0.5 rounded-sm border text-[10px] uppercase font-bold tracking-wider ${colors[p] || 'bg-gray-50'}`}>{p}</span>;
+    const getMarkerIcon = (priority) => {
+        let color = 'green';
+        if (priority === 'High') color = '#e74c3c';
+        else if (priority === 'Medium') color = '#e67e22';
+        return new L.DivIcon({
+            className: 'custom-icon',
+            html: `<div style="background:${color};width:14px;height:14px;border-radius:50%;border:2px solid white;box-shadow:0 2px 6px rgba(0,0,0,0.3)"></div>`,
+            iconSize: [14, 14], iconAnchor: [7, 7]
+        });
     };
 
-    const getStatusBadge = (s) => {
-        const colors = {
-            Submitted: 'bg-gray-100 text-gray-600 border-gray-200',
-            Assigned: 'bg-blue-50 text-blue-800 border-blue-200',
-            'In Progress': 'bg-yellow-50 text-yellow-800 border-yellow-200',
-            Resolved: 'bg-green-50 text-green-800 border-green-200',
-            Verified: 'bg-teal-50 text-teal-800 border-teal-200'
-        };
-        return <span className={`px-2 py-0.5 rounded-sm border text-[10px] uppercase font-bold tracking-wider ${colors[s] || 'bg-gray-50'}`}>{s}</span>;
+    const statusPill = (s) => {
+        const m = { 'Submitted': '#4A5B7A', 'Assigned': '#2B6BFF', 'In Progress': '#e67e22', 'Resolved': '#2ecc71', 'Verified': '#00838f', 'Reopened': '#ff6f00', 'Escalated': '#e74c3c' };
+        return { fontSize: 11, fontWeight: 700, padding: '3px 12px', borderRadius: 20, background: `${m[s] || '#aaa'}15`, color: m[s] || '#888' };
     };
 
     return (
-        <div className="min-h-screen bg-[#f3f4f6] pb-12 font-sans">
-
-            {/* --- SECTION 1: HEADER --- */}
-            <header className="bg-[#001f3f] shadow-lg sticky top-0 z-30 border-b-4 border-yellow-500">
-                <div className="max-w-7xl mx-auto py-4 px-4 sm:px-6 lg:px-8 flex justify-between items-center">
-                    <div className="flex items-center gap-4">
-                        <img
-                            src="https://upload.wikimedia.org/wikipedia/commons/5/55/Emblem_of_India.svg"
-                            alt="Emblem"
-                            className="h-10 invert brightness-0 filter"
-                        />
-                        <div>
-                            <h1 className="text-xl md:text-2xl font-serif font-bold text-white tracking-wide">Admin Control Center</h1>
-                            <p className="text-[10px] md:text-xs text-blue-200 uppercase tracking-wider">System Monitoring & Oversight • <span className="text-yellow-500 font-bold">Confidential</span></p>
-                        </div>
+        <div className="page-bg" style={{ minHeight: '100vh', paddingBottom: 80 }}>
+            {/* Header */}
+            <section style={{
+                background: 'var(--bg-secondary)', padding: '32px 0 24px',
+                borderBottom: '1px solid var(--border-light)'
+            }}>
+                <div className="container-js" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 16 }}>
+                    <div>
+                        <h1 style={{ fontSize: 24, marginBottom: 4 }}>
+                            District Administration
+                            {adminDistrict && (
+                                <span style={{
+                                    fontSize: 14, fontWeight: 500, color: 'var(--accent)',
+                                    marginLeft: 12, padding: '4px 14px', background: 'rgba(43,107,255,0.08)',
+                                    borderRadius: 20
+                                }}>📍 {adminDistrict}</span>
+                            )}
+                        </h1>
+                        <p style={{ fontSize: 14, margin: 0 }}>System Monitoring, Oversight & Intervention</p>
                     </div>
-                    <div className="text-right hidden md:block">
-                        <div className="bg-blue-900/50 px-4 py-1 rounded-sm border border-blue-800">
-                            <p className="text-[10px] font-bold text-blue-300 uppercase tracking-widest">Administrator Access</p>
-                            <p className="text-xs text-white font-mono">ID: ADMIN-ROOT-01</p>
-                        </div>
-                    </div>
+                    <div className="pill-js" style={{ fontSize: 11 }}>Administrator Access</div>
                 </div>
-            </header>
+            </section>
 
-            <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-
-                {/* --- SECTION 2: SYSTEM OVERVIEW --- */}
-                <div className="grid grid-cols-1 md:grid-cols-5 gap-4 mb-8">
+            <div className="container-js" style={{ paddingTop: 32 }}>
+                {/* Stats */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 14, marginBottom: 32 }}>
                     {[
-                        { label: 'Total Complaints', value: stats.total, color: 'border-l-4 border-blue-900 bg-white text-blue-900' },
-                        { label: 'Pending Action', value: stats.pending, color: 'border-l-4 border-orange-600 bg-white text-orange-800' },
-                        { label: 'High Priority', value: stats.highPriority, color: 'border-l-4 border-red-600 bg-white text-red-800' },
-                        { label: 'Resolved', value: stats.resolved, color: 'border-l-4 border-green-600 bg-white text-green-800' },
-                        { label: 'Verified', value: stats.verified, color: 'border-l-4 border-teal-600 bg-white text-teal-800' },
-                    ].map((stat, idx) => (
-                        <motion.div
-                            key={idx}
-                            initial={{ opacity: 0, y: 10 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            transition={{ delay: idx * 0.1 }}
-                            className={`p-4 rounded-sm shadow-sm hover:shadow-md transition-shadow ${stat.color}`}
-                        >
-                            <p className="text-[10px] text-gray-500 uppercase font-bold tracking-wider">{stat.label}</p>
-                            <p className="text-3xl font-serif font-extrabold mt-1">{stat.value}</p>
+                        { label: 'Total', value: stats.total, icon: '📊', color: 'var(--accent)' },
+                        { label: 'Pending', value: stats.pending, icon: '⏳', color: '#e67e22' },
+                        { label: 'High Priority', value: stats.highPriority, icon: '🔴', color: 'var(--color-danger)' },
+                        { label: 'Resolved', value: stats.resolved, icon: '✅', color: 'var(--color-success)' },
+                        { label: 'Verified', value: stats.verified, icon: '🤖', color: '#00838f' },
+                        { label: 'Reopened', value: stats.reopened, icon: '🔄', color: '#ff6f00' }
+                    ].map((s, i) => (
+                        <motion.div key={i} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
+                            transition={{ delay: i * 0.06 }} className="card-js" style={{ padding: 20 }}>
+                            <div style={{ fontSize: 22, marginBottom: 6 }}>{s.icon}</div>
+                            <div style={{ fontSize: 26, fontWeight: 700, fontFamily: 'var(--font-heading)', color: s.color }}>{s.value}</div>
+                            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{s.label}</div>
                         </motion.div>
                     ))}
                 </div>
 
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 mb-8">
-                    {/* --- DEPARTMENT PERFORMANCE CHART --- */}
-                    <div className="lg:col-span-2 bg-white p-6 rounded-sm shadow-sm border border-gray-200">
-                        <div className="flex justify-between items-center mb-6 border-b border-gray-100 pb-2">
-                            <h3 className="text-lg font-serif font-bold text-[#001f3f]">Department Workload Analysis</h3>
-                            <span className="text-[10px] uppercase font-bold text-gray-400 tracking-wider">Real-time Data</span>
-                        </div>
-
-                        <div className="h-64">
+                {/* Charts + AI Health */}
+                <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 20, marginBottom: 32 }}>
+                    <div className="card-js" style={{ padding: 24 }}>
+                        <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 20 }}>Department Workload</h3>
+                        <div style={{ height: 240 }}>
                             <ResponsiveContainer width="100%" height="100%">
                                 <BarChart data={chartData}>
-                                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e5e7eb" />
-                                    <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#6b7280' }} />
-                                    <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#6b7280' }} />
-                                    <Tooltip
-                                        cursor={{ fill: '#f3f4f6' }}
-                                        contentStyle={{ borderRadius: '4px', border: 'none', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }}
-                                    />
-                                    <Bar dataKey="count" radius={[2, 2, 0, 0]} barSize={40}>
-                                        {chartData.map((entry, index) => (
-                                            <Cell key={`cell-${index}`} fill={index % 2 === 0 ? '#1e3a8a' : '#3b82f6'} />
+                                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(14,26,51,0.06)" />
+                                    <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#4A5B7A' }} />
+                                    <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#4A5B7A' }} />
+                                    <Tooltip contentStyle={{ borderRadius: 12, border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }} />
+                                    <Bar dataKey="count" radius={[8, 8, 0, 0]} barSize={36}>
+                                        {chartData.map((_, i) => (
+                                            <Cell key={i} fill={i % 2 === 0 ? '#2B6BFF' : '#7cb3ff'} />
                                         ))}
                                     </Bar>
                                 </BarChart>
@@ -175,173 +209,176 @@ const AdminDashboard = () => {
                         </div>
                     </div>
 
-                    {/* --- AI METRICS --- */}
-                    <div className="bg-white p-6 rounded-sm shadow-sm border border-gray-200">
-                        <h3 className="text-lg font-serif font-bold text-[#001f3f] mb-6 border-b border-gray-100 pb-2">AI System Health</h3>
-                        <div className="space-y-4">
-                            {[
-                                { name: 'Text Categorization', status: 'Active', color: 'green' },
-                                { name: 'Priority Engine', status: 'Active', color: 'green' },
-                                { name: 'YOLOv8 Vision', status: 'Active', color: 'green' }
-                            ].map((item) => (
-                                <div key={item.name} className="flex justify-between items-center p-4 bg-gray-50 rounded-sm border border-gray-100">
-                                    <span className="text-sm font-bold text-gray-700">{item.name}</span>
-                                    <div className="flex items-center gap-2">
-                                        <span className="relative flex h-2 w-2">
-                                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
-                                            <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
-                                        </span>
-                                        <span className="text-[10px] font-bold text-green-700 uppercase tracking-widest">{item.status}</span>
-                                    </div>
+                    <div className="card-js" style={{ padding: 24 }}>
+                        <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 20 }}>AI System Health</h3>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                            {['Text Categorization', 'Priority Engine', 'YOLOv8 Vision'].map(name => (
+                                <div key={name} style={{
+                                    padding: '14px 16px', background: 'var(--bg-secondary)', borderRadius: 12,
+                                    display: 'flex', justifyContent: 'space-between', alignItems: 'center'
+                                }}>
+                                    <span style={{ fontSize: 13, fontWeight: 500 }}>{name}</span>
+                                    <span style={{
+                                        fontSize: 11, fontWeight: 700, color: 'var(--color-success)',
+                                        display: 'flex', alignItems: 'center', gap: 6
+                                    }}>
+                                        <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--color-success)' }} />
+                                        Active
+                                    </span>
                                 </div>
                             ))}
-                            <div className="mt-6 pt-4 border-t border-gray-100">
-                                <p className="text-[10px] text-gray-400 uppercase tracking-widest text-center">Last System Audit: Today, 08:00 AM</p>
-                            </div>
                         </div>
                     </div>
                 </div>
 
-                {/* --- SECTION: GEOSPATIAL MAP --- */}
-                <div className="bg-white p-6 rounded-sm shadow-sm border border-gray-200 mb-8">
-                    <h3 className="text-lg font-serif font-bold text-[#001f3f] mb-4 border-b pb-2 flex items-center gap-2">
-                        <span>🗺️</span> Complaint Geo-Distribution
+                {/* Geo Map - District-Specific */}
+                <div className="card-js" style={{ padding: 24, marginBottom: 32 }}>
+                    <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 16 }}>
+                        🗺️ Complaint Distribution
+                        {adminDistrict && (
+                            <span style={{ fontSize: 13, fontWeight: 400, color: 'var(--text-secondary)', marginLeft: 8 }}>
+                                — {adminDistrict} District
+                            </span>
+                        )}
                     </h3>
-                    <div className="h-[500px] w-full rounded-sm overflow-hidden border border-gray-300 relative z-0">
-                        <MapContainer center={[28.6139, 77.2090]} zoom={11} scrollWheelZoom={false} style={{ height: '100%', width: '100%' }}>
+                    <div style={{ height: 420, borderRadius: 16, overflow: 'hidden', border: '1px solid var(--border-light)' }}>
+                        <MapContainer center={mapCenter} zoom={mapZoom} scrollWheelZoom={false} style={{ height: '100%', width: '100%' }}>
+                            <ChangeView center={mapCenter} zoom={mapZoom} />
                             <TileLayer
-                                attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+                                attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
                                 url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
                             />
-                            {complaints
-                                .filter(c => c.location && c.location.lat && c.location.lng)
-                                .map(c => {
-                                    // Custom Icon Logic
-                                    const getMarkerIcon = (priority) => {
-                                        // Using Leaflet's built-in icon with color filters or custom URLs
-                                        // For simplicity and reliability without external assets, we use CSS filter on default or specific colored marker URLs if available.
-                                        // Or better, use a divIcon or circle marker for cleaner look, but user asked for "Pins".
-                                        // Let's use simple CircleMarkers here too? No, user said "Pins".
-                                        // Let's use a standard trick: URL to a colored marker API or local.
-                                        // Since we don't have local colored assets, let's use the standard "hue-rotate" trick on the default icon style if possible, 
-                                        // OR just use CircleMarkers which are natively colorable and often preferred for "City Issue Map".
-                                        // "Displays all complaints as pins. Pin color based on priority".
-                                        // Let's use CircleMarkers but style them like pins?
-                                        // Actually, let's use CircleMarkers (dots) as they are cleaner for "City maps" and easier to color code directly.
-                                        // If user strictly wants "Pins", we can try, but colored pins need assets.
-                                        // Let's stick to CircleMarkers but make them larger/distinct.
-                                        // Wait, the requirement says "Pin color based on priority". 
-                                        // Let's use L.divIcon with a colored span.
-
-                                        let color = 'green';
-                                        if (priority === 'High') color = 'red';
-                                        else if (priority === 'Medium') color = 'orange';
-
-                                        return new L.DivIcon({
-                                            className: 'custom-icon',
-                                            html: `<div style="background-color: ${color}; width: 12px; height: 12px; border-radius: 50%; border: 2px solid white; box-shadow: 0 0 4px rgba(0,0,0,0.4);"></div>`,
-                                            iconSize: [12, 12],
-                                            iconAnchor: [6, 6]
-                                        });
-                                    };
-
-                                    return (
-                                        <Marker
-                                            key={c._id}
-                                            position={[c.location.lat, c.location.lng]}
-                                            icon={getMarkerIcon(c.priority)}
-                                        >
-                                            <Popup>
-                                                <div className="min-w-[200px]">
-                                                    <strong className="text-sm text-[#001f3f]">{c.category} Issue</strong>
-                                                    <div className="text-xs text-gray-600 my-1">
-                                                        Status: <span className={`font-bold ${c.status === 'Resolved' ? 'text-green-600' : 'text-blue-600'}`}>{c.status}</span>
-                                                    </div>
-                                                    <p className="text-xs text-gray-500 line-clamp-2 mb-2">{c.text || c.complaint_text}</p>
-                                                    <div className="flex gap-2">
-                                                        {c.priority && (
-                                                            <span className={`text-[10px] px-2 py-0.5 rounded-full text-white ${c.priority === 'High' ? 'bg-red-500' : c.priority === 'Medium' ? 'bg-orange-500' : 'bg-green-500'}`}>
-                                                                {c.priority}
-                                                            </span>
-                                                        )}
-                                                    </div>
-                                                    <Link to={`/complaint/${c._id}`} className="block mt-2 text-xs text-blue-700 underline font-bold">View Details</Link>
-                                                </div>
-                                            </Popup>
-                                        </Marker>
-                                    );
-                                })
-                            }
+                            {complaints.filter(c => c.location?.lat && c.location?.lng).map(c => (
+                                <Marker key={c._id} position={[c.location.lat, c.location.lng]} icon={getMarkerIcon(c.priority)}>
+                                    <Popup>
+                                        <div style={{ minWidth: 180 }}>
+                                            <strong>{c.category} Issue</strong>
+                                            <div style={{ fontSize: 12, margin: '4px 0' }}>Status: <b>{c.status}</b></div>
+                                            <p style={{ fontSize: 12, color: '#666' }}>{(c.text || c.complaint_text || '').substring(0, 80)}...</p>
+                                            <Link to={`/complaint/${c._id}`} style={{ fontSize: 12, fontWeight: 600, color: 'var(--accent)' }}>View →</Link>
+                                        </div>
+                                    </Popup>
+                                </Marker>
+                            ))}
                         </MapContainer>
                     </div>
                 </div>
 
-                {/* --- SECTION 3: COMPLAINT MANAGEMENT --- */}
-                <div className="bg-white rounded-sm shadow-sm border border-gray-200 overflow-hidden">
-                    <div className="p-6 border-b border-gray-200 flex flex-col md:flex-row justify-between items-center gap-4 bg-gray-50">
-                        <h2 className="text-lg font-serif font-bold text-[#001f3f] flex items-center gap-2">
-                            Grievance Registry <span className="bg-blue-100 text-blue-800 text-xs px-2 py-1 rounded-full font-sans font-bold">{filteredComplaints.length} Records</span>
-                        </h2>
+                {/* Complaint Table with NEW Search Filters */}
+                <div className="card-js" style={{ padding: 0, overflow: 'hidden' }}>
+                    <div style={{
+                        padding: '20px 24px', borderBottom: '1px solid var(--border-light)'
+                    }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12, marginBottom: 16 }}>
+                            <h3 style={{ fontSize: 16, fontWeight: 600 }}>
+                                Grievance Registry <span className="pill-js" style={{ fontSize: 11, marginLeft: 8 }}>{complaints.length}</span>
+                            </h3>
+                        </div>
 
-                        <div className="flex gap-4 w-full md:w-auto">
-                            <select
-                                className="border border-gray-300 rounded-sm px-4 py-2 text-sm focus:ring-1 focus:ring-blue-900 outline-none bg-white font-medium text-gray-700"
-                                value={filterStatus}
-                                onChange={(e) => setFilterStatus(e.target.value)}
-                            >
-                                <option value="All">All Statuses</option>
-                                <option value="Submitted">Submitted</option>
-                                <option value="Assigned">Assigned</option>
-                                <option value="In Progress">In Progress</option>
-                                <option value="Resolved">Resolved</option>
-                                <option value="Verified">Verified</option>
-                            </select>
-                            <input
-                                type="text"
-                                placeholder="Search ID or Keyword..."
-                                className="border border-gray-300 rounded-sm px-4 py-2 text-sm focus:ring-1 focus:ring-blue-900 outline-none w-full md:w-64"
-                                value={searchTerm}
-                                onChange={(e) => setSearchTerm(e.target.value)}
-                            />
+                        {/* ====== NEW FILTER BAR: Date & Ref ID ====== */}
+                        <div style={{
+                            display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end'
+                        }}>
+                            <div>
+                                <label style={{ display: 'block', fontSize: 11, fontWeight: 700, color: 'var(--text-secondary)', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.05em' }}>From Date</label>
+                                <input className="input-js" type="date" value={dateFrom}
+                                    onChange={e => setDateFrom(e.target.value)}
+                                    style={{ width: 160, height: 40, fontSize: 13 }} />
+                            </div>
+                            <div>
+                                <label style={{ display: 'block', fontSize: 11, fontWeight: 700, color: 'var(--text-secondary)', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.05em' }}>To Date</label>
+                                <input className="input-js" type="date" value={dateTo}
+                                    onChange={e => setDateTo(e.target.value)}
+                                    style={{ width: 160, height: 40, fontSize: 13 }} />
+                            </div>
+                            <div>
+                                <label style={{ display: 'block', fontSize: 11, fontWeight: 700, color: 'var(--text-secondary)', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Referral ID</label>
+                                <input className="input-js" type="text" placeholder="e.g., JAN-ROAD-2026"
+                                    value={searchRefId} onChange={e => setSearchRefId(e.target.value)}
+                                    style={{ width: 220, height: 40, fontSize: 13 }} />
+                            </div>
+                            <div>
+                                <label style={{ display: 'block', fontSize: 11, fontWeight: 700, color: 'var(--text-secondary)', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Status</label>
+                                <select className="input-js" value={filterStatus} onChange={e => setFilterStatus(e.target.value)}
+                                    style={{ width: 150, height: 40, fontSize: 13 }}>
+                                    {['All', 'Submitted', 'Assigned', 'In Progress', 'Resolved', 'Verified', 'Reopened', 'Escalated'].map(s => (
+                                        <option key={s} value={s}>{s === 'All' ? 'All Statuses' : s}</option>
+                                    ))}
+                                </select>
+                            </div>
+                            {(dateFrom || dateTo || searchRefId) && (
+                                <button onClick={() => { setDateFrom(''); setDateTo(''); setSearchRefId(''); setFilterStatus('All'); }}
+                                    style={{
+                                        height: 40, padding: '0 16px', borderRadius: 10, border: '1px solid var(--border-color)',
+                                        background: 'transparent', color: 'var(--text-secondary)', fontWeight: 600,
+                                        fontSize: 12, cursor: 'pointer'
+                                    }}>✕ Clear Filters</button>
+                            )}
                         </div>
                     </div>
 
-                    <div className="overflow-x-auto">
-                        <table className="w-full text-left text-sm">
-                            <thead className="bg-[#001f3f] text-white uppercase font-bold text-[10px] tracking-wider">
-                                <tr>
-                                    <th className="px-6 py-4">Ref ID / Date</th>
-                                    <th className="px-6 py-4">Grievance Details</th>
-                                    <th className="px-6 py-4">Category</th>
-                                    <th className="px-6 py-4">Priority Level</th>
-                                    <th className="px-6 py-4">Current Status</th>
-                                    <th className="px-6 py-4">Action</th>
+                    <div style={{ overflowX: 'auto' }}>
+                        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                            <thead>
+                                <tr style={{ background: 'var(--bg-secondary)' }}>
+                                    {['Ref ID / Date', 'Details', 'Category', 'Priority', 'Status', 'Action'].map(h => (
+                                        <th key={h} style={{
+                                            padding: '14px 20px', textAlign: 'left', fontSize: 11, fontWeight: 700,
+                                            color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.06em'
+                                        }}>{h}</th>
+                                    ))}
                                 </tr>
                             </thead>
-                            <tbody className="divide-y divide-gray-100">
-                                {loading && <tr><td colSpan="6" className="text-center py-8">Loading Registry...</td></tr>}
-                                {!loading && filteredComplaints.length === 0 && (
-                                    <tr><td colSpan="6" className="text-center py-12 text-gray-500 font-serif italic">No matching records found in the registry.</td></tr>
+                            <tbody>
+                                {loading && <tr><td colSpan="6" style={{ textAlign: 'center', padding: 40 }}>Loading...</td></tr>}
+                                {!loading && complaints.length === 0 && (
+                                    <tr><td colSpan="6" style={{ textAlign: 'center', padding: 40, color: 'var(--text-secondary)' }}>No records found.</td></tr>
                                 )}
-                                {filteredComplaints.map((c) => (
-                                    <tr key={c._id} className="hover:bg-blue-50/50 transition duration-150 group">
-                                        <td className="px-6 py-4">
-                                            <div className="font-mono text-xs font-bold text-[#001f3f]">{c._id.slice(-6).toUpperCase()}</div>
-                                            <div className="text-[10px] text-gray-500 font-medium">{new Date(c.created_at).toLocaleDateString()}</div>
+                                {complaints.map(c => (
+                                    <tr key={c._id} style={{
+                                        borderBottom: '1px solid var(--border-light)',
+                                        transition: 'background 0.15s', cursor: 'pointer'
+                                    }}
+                                        onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-secondary)'}
+                                        onMouseLeave={e => e.currentTarget.style.background = ''}>
+                                        <td style={{ padding: '14px 20px' }}>
+                                            <div style={{ fontWeight: 700, fontSize: 12 }}>{c.ref_id || c._id.slice(-6).toUpperCase()}</div>
+                                            <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{new Date(c.created_at).toLocaleDateString()}</div>
                                         </td>
-                                        <td className="px-6 py-4 max-w-xs truncate text-gray-800 font-medium group-hover:text-blue-800">
-                                            {c.complaint_text || c.text || 'No description provided'}
+                                        <td style={{ padding: '14px 20px', maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                            {c.complaint_text || c.text || 'N/A'}
                                         </td>
-                                        <td className="px-6 py-4 text-gray-600 font-medium">{c.category}</td>
-                                        <td className="px-6 py-4">{getPriorityBadge(c.priority)}</td>
-                                        <td className="px-6 py-4">{getStatusBadge(c.status)}</td>
-                                        <td className="px-6 py-4">
-                                            <Link
-                                                to={`/complaint/${c._id}`}
-                                                className="text-[#001f3f] hover:text-orange-600 font-bold text-[10px] uppercase tracking-wider border border-gray-200 hover:border-orange-200 px-3 py-1 rounded-sm bg-white shadow-sm transition-all inline-block"
-                                            >
-                                                Inspect
-                                            </Link>
+                                        <td style={{ padding: '14px 20px', color: 'var(--text-secondary)' }}>{c.category}</td>
+                                        <td style={{ padding: '14px 20px' }}>
+                                            <span style={{
+                                                fontSize: 11, fontWeight: 700, padding: '3px 10px', borderRadius: 20,
+                                                background: c.priority === 'High' ? '#fef2f2' : c.priority === 'Medium' ? '#fff7ed' : '#e6f4ea',
+                                                color: c.priority === 'High' ? '#e74c3c' : c.priority === 'Medium' ? '#e67e22' : '#2ecc71'
+                                            }}>{c.priority}</span>
+                                        </td>
+                                        <td style={{ padding: '14px 20px' }}><span style={statusPill(c.status)}>{c.status}</span></td>
+                                        <td style={{ padding: '14px 20px' }}>
+                                            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                                                <Link to={`/complaint/${c._id}`}
+                                                    style={{
+                                                        fontSize: 12, fontWeight: 600, color: 'var(--accent)',
+                                                        textDecoration: 'none', padding: '6px 14px',
+                                                        borderRadius: 8, border: '1px solid rgba(43,107,255,0.2)',
+                                                        transition: 'all 0.2s'
+                                                    }}>Inspect</Link>
+                                                <button onClick={() => { setInterventionTarget({ ...c, mode: 'override' }); setOverrideStatus(''); setAdminNote(''); }}
+                                                    style={{
+                                                        fontSize: 11, fontWeight: 600, color: '#e74c3c', padding: '5px 10px',
+                                                        borderRadius: 8, border: '1px solid rgba(231,76,60,0.2)',
+                                                        background: 'transparent', cursor: 'pointer'
+                                                    }}>⚡ Override</button>
+                                                <button onClick={() => { setInterventionTarget({ ...c, mode: 'reassign' }); setReassignDept(''); setAdminNote(''); }}
+                                                    style={{
+                                                        fontSize: 11, fontWeight: 600, color: '#2ecc71', padding: '5px 10px',
+                                                        borderRadius: 8, border: '1px solid rgba(46,204,113,0.2)',
+                                                        background: 'transparent', cursor: 'pointer'
+                                                    }}>🔄 Reassign</button>
+                                            </div>
                                         </td>
                                     </tr>
                                 ))}
@@ -349,122 +386,152 @@ const AdminDashboard = () => {
                         </table>
                     </div>
                 </div>
-            </main>
+            </div>
 
-            {/* --- SECTION 4: DETAIL MODAL --- */}
+            {/* Detail Modal */}
             <AnimatePresence>
                 {selectedComplaint && (
-                    <motion.div
-                        initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-                        className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+                    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
                         onClick={() => setSelectedComplaint(null)}
-                    >
+                        style={{
+                            position: 'fixed', inset: 0, zIndex: 100, display: 'flex',
+                            alignItems: 'center', justifyContent: 'center',
+                            background: 'rgba(14,26,51,0.5)', backdropFilter: 'blur(6px)', padding: 20
+                        }}>
                         <motion.div
-                            initial={{ y: 50, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 50, opacity: 0 }}
-                            className="bg-white rounded-sm w-full max-w-6xl max-h-[90vh] overflow-y-auto shadow-2xl flex flex-col border-t-8 border-[#001f3f]"
-                            onClick={(e) => e.stopPropagation()}
-                        >
-                            <div className="p-6 border-b border-gray-100 flex justify-between items-center sticky top-0 bg-white z-10 shadow-sm">
+                            initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.95, opacity: 0 }}
+                            onClick={e => e.stopPropagation()} className="card-js"
+                            style={{ width: '100%', maxWidth: 800, maxHeight: '90vh', overflowY: 'auto', padding: 0, borderRadius: 24 }}>
+                            <div style={{
+                                padding: '20px 28px', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                                borderBottom: '1px solid var(--border-light)', position: 'sticky', top: 0, background: 'white', zIndex: 2, borderRadius: '24px 24px 0 0'
+                            }}>
                                 <div>
-                                    <h2 className="text-xl font-serif font-bold text-[#001f3f]">Grievance Case File: {selectedComplaint._id}</h2>
-                                    <p className="text-xs text-gray-500 font-mono">Timestamp: {new Date(selectedComplaint.created_at).toLocaleString()}</p>
+                                    <h2 style={{ fontSize: 18, fontWeight: 600, marginBottom: 2 }}>Case File</h2>
+                                    <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>ID: {selectedComplaint._id}</span>
                                 </div>
-                                <div className="flex gap-3">
-                                    <button className="px-4 py-2 border border-red-200 text-red-700 bg-red-50 rounded-sm text-xs font-bold uppercase tracking-wider hover:bg-red-100 shadow-sm">⚠ Flag for Escalation</button>
-                                    <button onClick={() => setSelectedComplaint(null)} className="text-gray-400 hover:text-red-600 font-bold text-2xl transition-colors">×</button>
-                                </div>
+                                <button onClick={() => setSelectedComplaint(null)} style={{
+                                    width: 36, height: 36, borderRadius: '50%', border: 'none',
+                                    background: 'var(--bg-secondary)', cursor: 'pointer', fontSize: 18,
+                                    display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-secondary)'
+                                }}>✕</button>
                             </div>
-
-                            <div className="p-8 grid grid-cols-1 md:grid-cols-2 gap-8 bg-gray-50/50">
-                                {/* Left Column */}
-                                <div className="space-y-6">
-                                    <div className="bg-white p-6 rounded-sm shadow-sm border border-gray-200">
-                                        <h3 className="text-xs font-bold text-gray-500 uppercase tracking-widest mb-6 border-b pb-2">AI Diagnostic Report</h3>
-                                        <div className="grid grid-cols-2 gap-6">
-                                            <div>
-                                                <label className="text-[10px] text-gray-400 font-bold uppercase">Topic Category</label>
-                                                <p className="font-bold text-lg text-[#001f3f]">{selectedComplaint.category}</p>
-                                            </div>
-                                            <div>
-                                                <label className="text-[10px] text-gray-400 font-bold uppercase">Urgency Level</label>
-                                                <p className={`font-bold text-lg ${selectedComplaint.priority === 'High' ? 'text-red-700' : 'text-gray-800'}`}>{selectedComplaint.priority}</p>
-                                            </div>
-                                            <div>
-                                                <label className="text-[10px] text-gray-400 font-bold uppercase">Assigned Dept</label>
-                                                <p className="font-semibold text-gray-800">{selectedComplaint.department}</p>
-                                            </div>
-                                            <div>
-                                                <label className="text-[10px] text-gray-400 font-bold uppercase">AI Confidence</label>
-                                                <p className="text-sm font-mono text-green-700 font-bold">92% Match</p>
-                                            </div>
-                                        </div>
-                                    </div>
-
-                                    <div className="bg-white p-6 rounded-sm shadow-sm border border-gray-200">
-                                        <h3 className="text-xs font-bold text-gray-500 uppercase tracking-widest mb-4">Case Timeline</h3>
-                                        <StatusTracker status={selectedComplaint.status} />
-                                    </div>
-
+                            <div style={{ padding: 28 }}>
+                                <div style={{ padding: 16, background: 'var(--bg-secondary)', borderRadius: 16, marginBottom: 24 }}>
+                                    <StatusTracker status={selectedComplaint.status} />
+                                </div>
+                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 20 }}>
                                     <div>
-                                        <h3 className="text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">Description of Issue</h3>
-                                        <p className="text-gray-800 bg-white border border-gray-200 p-4 rounded-sm text-sm leading-relaxed shadow-sm">
-                                            {selectedComplaint.complaint_text || selectedComplaint.text || 'No description available.'}
+                                        <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 8 }}>AI Diagnostic</div>
+                                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+                                            <span className="pill-js" style={{ fontSize: 11 }}>{selectedComplaint.category}</span>
+                                            <span className="pill-js" style={{ fontSize: 11 }}>{selectedComplaint.priority}</span>
+                                            <span className="pill-js" style={{ fontSize: 11 }}>{selectedComplaint.department}</span>
+                                        </div>
+                                        <p style={{ fontSize: 14, lineHeight: 1.7, margin: 0 }}>
+                                            {selectedComplaint.complaint_text || selectedComplaint.text || 'No description.'}
                                         </p>
                                     </div>
-                                </div>
-
-                                {/* Right Column */}
-                                <div className="space-y-6">
-                                    <div className="bg-white p-6 rounded-sm shadow-sm border border-gray-200">
-                                        <h3 className="text-xs font-bold text-gray-500 uppercase tracking-widest mb-4">Evidence & Documentation</h3>
-                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                                            <div>
-                                                <label className="text-[10px] text-gray-400 font-bold uppercase mb-2 block">Initial Status (Before)</label>
-                                                <div className="p-1 border border-gray-200 rounded-sm">
-                                                    <img
-                                                        src={`http://localhost:5000/uploads/${selectedComplaint.image_before}`}
-                                                        alt="Before"
-                                                        className="w-full h-40 object-cover rounded-sm hover:scale-105 transition duration-300"
-                                                    />
-                                                </div>
-                                            </div>
-                                            {selectedComplaint.image_after ? (
-                                                <div>
-                                                    <label className="text-[10px] text-green-600 font-bold uppercase mb-2 block">Resolution Proof (After)</label>
-                                                    <div className="p-1 border-2 border-green-500/20 rounded-sm">
-                                                        <img
-                                                            src={`http://localhost:5000/uploads/${selectedComplaint.image_after}`}
-                                                            alt="After"
-                                                            className="w-full h-40 object-cover rounded-sm hover:scale-105 transition duration-300"
-                                                        />
-                                                    </div>
-                                                </div>
-                                            ) : (
-                                                <div className="h-40 bg-gray-50 rounded-sm flex flex-col items-center justify-center text-gray-400 text-xs text-center p-4 border border-dashed border-gray-300">
-                                                    <span className="text-2xl opacity-30 mb-2">⏳</span>
-                                                    Resolution pending
-                                                </div>
-                                            )}
-                                        </div>
+                                    <div>
+                                        <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 8 }}>Evidence</div>
+                                        <img src={`http://localhost:5000/uploads/${selectedComplaint.image_before}`} alt="Before"
+                                            style={{ width: '100%', borderRadius: 12, border: '1px solid var(--border-light)', marginBottom: 8 }} />
+                                        {selectedComplaint.image_after && (
+                                            <img src={`http://localhost:5000/uploads/${selectedComplaint.image_after}`} alt="After"
+                                                style={{ width: '100%', borderRadius: 12, border: '2px solid var(--color-success)' }} />
+                                        )}
                                     </div>
-
-                                    {selectedComplaint.remarks && (
-                                        <div className="bg-blue-50 p-6 rounded-sm border-l-4 border-blue-600 shadow-sm">
-                                            <label className="text-[10px] font-bold text-blue-800 uppercase mb-2 block tracking-widest">Official Resolution Report</label>
-                                            <p className="text-blue-900 text-sm italic font-medium">"{selectedComplaint.remarks}"</p>
-                                        </div>
-                                    )}
-
-                                    {selectedComplaint.feedback && (
-                                        <div className="bg-green-50 p-6 rounded-sm border-l-4 border-green-600 shadow-sm">
-                                            <label className="text-[10px] font-bold text-green-800 uppercase mb-2 block tracking-widest">Citizen Satisfaction Feedback</label>
-                                            <div className="flex items-center gap-2 mb-2">
-                                                <span className="text-yellow-500 text-lg">{'★'.repeat(selectedComplaint.feedback.rating)}<span className="text-gray-300">{'★'.repeat(5 - selectedComplaint.feedback.rating)}</span></span>
-                                            </div>
-                                            <p className="text-green-900 text-sm">"{selectedComplaint.feedback.comment}"</p>
-                                        </div>
-                                    )}
                                 </div>
+                                {selectedComplaint.feedback && (
+                                    <div style={{ marginTop: 20, padding: '16px 20px', background: '#e6f4ea', borderRadius: 12 }}>
+                                        <strong style={{ fontSize: 12 }}>Citizen Feedback:</strong>
+                                        <span style={{ marginLeft: 8, color: '#f1c40f' }}>{'★'.repeat(selectedComplaint.feedback.rating)}</span>
+                                        <p style={{ fontSize: 13, margin: '4px 0 0' }}>{selectedComplaint.feedback.comment}</p>
+                                    </div>
+                                )}
+                            </div>
+                        </motion.div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+
+            {/* Success Toast */}
+            <AnimatePresence>
+                {successMsg && (
+                    <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }}
+                        style={{
+                            position: 'fixed', top: 80, right: 20, zIndex: 1000,
+                            background: '#4caf50', color: '#fff', padding: '12px 24px',
+                            borderRadius: 12, fontWeight: 600, fontSize: 14, boxShadow: '0 4px 20px rgba(0,0,0,0.15)'
+                        }}>
+                        ✅ {successMsg}
+                    </motion.div>
+                )}
+            </AnimatePresence>
+
+            {/* Intervention Modal */}
+            <AnimatePresence>
+                {interventionTarget && (
+                    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                        style={{
+                            position: 'fixed', inset: 0, zIndex: 200, display: 'flex',
+                            alignItems: 'center', justifyContent: 'center',
+                            background: 'rgba(14,26,51,0.5)', backdropFilter: 'blur(6px)', padding: 20
+                        }}
+                        onClick={() => setInterventionTarget(null)}>
+                        <motion.div initial={{ scale: 0.9 }} animate={{ scale: 1 }} exit={{ scale: 0.9 }}
+                            onClick={e => e.stopPropagation()}
+                            style={{
+                                background: 'var(--bg-primary)', borderRadius: 20, padding: 28,
+                                maxWidth: 450, width: '100%', boxShadow: '0 20px 60px rgba(0,0,0,0.2)'
+                            }}>
+                            <h3 style={{ fontSize: 18, fontWeight: 700, marginBottom: 4 }}>
+                                {interventionTarget.mode === 'override' ? '⚡ Override Status' : '🔄 Reassign Department'}
+                            </h3>
+                            <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 20 }}>
+                                Complaint: {interventionTarget.ref_id || interventionTarget._id.slice(-6).toUpperCase()} — {interventionTarget.category}
+                            </p>
+
+                            {interventionTarget.mode === 'override' ? (
+                                <>
+                                    <label style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: 8 }}>New Status</label>
+                                    <select value={overrideStatus} onChange={e => setOverrideStatus(e.target.value)}
+                                        style={{ width: '100%', padding: '12px 16px', borderRadius: 12, border: '1px solid var(--border-color)', fontSize: 14, background: 'var(--bg-secondary)', color: 'var(--text-primary)', marginBottom: 16 }}>
+                                        <option value="">— Select status —</option>
+                                        {['Pending', 'Assigned', 'In Progress', 'Resolved', 'Escalated', 'Reopened'].map(s => <option key={s} value={s}>{s}</option>)}
+                                    </select>
+                                </>
+                            ) : (
+                                <>
+                                    <label style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: 8 }}>New Department</label>
+                                    <select value={reassignDept} onChange={e => setReassignDept(e.target.value)}
+                                        style={{ width: '100%', padding: '12px 16px', borderRadius: 12, border: '1px solid var(--border-color)', fontSize: 14, background: 'var(--bg-secondary)', color: 'var(--text-primary)', marginBottom: 16 }}>
+                                        <option value="">— Select department —</option>
+                                        {['Road', 'Water', 'Electricity', 'Sanitation'].map(d => <option key={d} value={d}>{d}</option>)}
+                                    </select>
+                                </>
+                            )}
+
+                            <label style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: 8 }}>Admin Note (optional)</label>
+                            <textarea value={adminNote} onChange={e => setAdminNote(e.target.value)}
+                                rows={3} placeholder="Reason for intervention..."
+                                style={{ width: '100%', padding: '12px 16px', borderRadius: 12, border: '1px solid var(--border-color)', fontSize: 14, background: 'var(--bg-secondary)', color: 'var(--text-primary)', marginBottom: 20, resize: 'vertical' }} />
+
+                            <div style={{ display: 'flex', gap: 12 }}>
+                                <button onClick={() => setInterventionTarget(null)}
+                                    style={{ flex: 1, padding: 12, borderRadius: 12, border: '1px solid var(--border-color)', background: 'transparent', color: 'var(--text-secondary)', fontWeight: 600, fontSize: 14, cursor: 'pointer' }}>
+                                    Cancel
+                                </button>
+                                <button onClick={interventionTarget.mode === 'override' ? handleOverride : handleReassignDept}
+                                    disabled={actionLoading || (interventionTarget.mode === 'override' ? !overrideStatus : !reassignDept)}
+                                    style={{
+                                        flex: 1, padding: 12, borderRadius: 12, border: 'none',
+                                        background: (interventionTarget.mode === 'override' ? overrideStatus : reassignDept) ? (interventionTarget.mode === 'override' ? '#e74c3c' : '#2ecc71') : '#ccc',
+                                        color: '#fff', fontWeight: 600, fontSize: 14, cursor: 'pointer',
+                                        opacity: actionLoading ? 0.7 : 1
+                                    }}>
+                                    {actionLoading ? 'Processing...' : interventionTarget.mode === 'override' ? '⚡ Override' : '🔄 Reassign'}
+                                </button>
                             </div>
                         </motion.div>
                     </motion.div>
