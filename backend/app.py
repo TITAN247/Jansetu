@@ -1,4 +1,4 @@
-from flask import Flask, send_from_directory, request
+from flask import Flask, send_from_directory, request, send_file
 from flask_cors import CORS
 from config import Config
 from database.mongo import init_db
@@ -8,9 +8,12 @@ from routes.worker_routes import worker_bp
 from routes.admin_routes import admin_bp
 import os
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder='../frontend/dist', static_url_path='')
 app.config.from_object(Config)
-CORS(app)
+
+# Enable CORS only in development (when running locally)
+if os.getenv('FLASK_ENV') != 'production':
+    CORS(app)
 
 # Global Request Logging
 @app.before_request
@@ -44,11 +47,28 @@ app.register_blueprint(notification_bp, url_prefix='/api/notifications')
 def uploaded_file(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
+# Serve Frontend (Single Page Application)
 @app.route('/')
-def index():
-    return "Jansetu AI Backend Running"
+def serve_frontend():
+    return send_file(os.path.join(app.static_folder, 'index.html'))
+
+# Handle client-side routing - serve index.html for all non-API routes
+@app.route('/<path:path>')
+def serve_static(path):
+    # If path starts with api/, it's an API request - return 404 if not handled
+    if path.startswith('api/'):
+        return {"error": "API endpoint not found"}, 404
+    
+    # Check if file exists in static folder
+    file_path = os.path.join(app.static_folder, path)
+    if os.path.exists(file_path) and os.path.isfile(file_path):
+        return send_from_directory(app.static_folder, path)
+    
+    # Otherwise serve index.html for client-side routing
+    return send_file(os.path.join(app.static_folder, 'index.html'))
 
 if __name__ == '__main__':
     if not os.path.exists(Config.UPLOAD_FOLDER):
         os.makedirs(Config.UPLOAD_FOLDER)
-    app.run(debug=True, port=5000)
+    port = int(os.getenv('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)

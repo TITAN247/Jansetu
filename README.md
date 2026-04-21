@@ -33,7 +33,9 @@ Access the application at:
 
 ---
 
-## Deployment to Render.com
+## Deployment to Render.com (Single Service)
+
+Both frontend and backend run on **one service** for simplicity.
 
 ### Step 1: Push to GitHub
 ```bash
@@ -44,42 +46,49 @@ git push origin main
 
 ### Step 2: Deploy on Render
 
-1. **Create Web Service (Backend)**
-   - Go to [Render Dashboard](https://dashboard.render.com)
-   - Click "New Web Service"
-   - Connect your GitHub repo
-   - Settings:
-     - **Name**: `jansetu-api`
-     - **Environment**: Python 3
-     - **Build Command**: `cd backend && pip install -r requirements.txt`
-     - **Start Command**: `cd backend && gunicorn app:app --bind 0.0.0.0:$PORT`
-   - Add Environment Variables:
-     ```
-     MONGO_URI=mongodb+srv://username:password@cluster.mongodb.net/jansetu_ai?retryWrites=true&w=majority
-     SECRET_KEY=your-secret-key-here
-     EMAIL_SENDER=your-email@gmail.com
-     EMAIL_PASSWORD=your-app-password
-     SMTP_SERVER=smtp.gmail.com
-     SMTP_PORT=587
-     ```
+1. Go to [Render Dashboard](https://dashboard.render.com)
+2. Click "New Web Service"
+3. Connect your GitHub repo: `TITAN247/Jansetu`
+4. **Settings:**
+   | Field | Value |
+   |-------|-------|
+   | **Name** | `jansetu-ai` |
+   | **Environment** | `Python 3` |
+   | **Build Command** | See below |
+   | **Start Command** | `cd backend && gunicorn app:app --bind 0.0.0.0:$PORT --workers 2` |
 
-2. **Create Static Site (Frontend)**
-   - Click "New Static Site"
-   - Connect same repo
-   - Settings:
-     - **Name**: `jansetu-web`
-     - **Build Command**: `cd frontend && npm install && npm run build`
-     - **Publish Directory**: `frontend/dist`
-   - Add Environment Variable:
-     ```
-     VITE_API_URL=https://jansetu-api.onrender.com
-     ```
+5. **Build Command:**
+   ```bash
+   # Install Node.js for frontend build
+   curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
+   apt-get install -y nodejs
+   # Build frontend
+   cd frontend && npm install && npm run build
+   # Install Python dependencies
+   cd ../backend && pip install -r requirements.txt
+   ```
 
-### Alternative: Use Render Blueprint (render.yaml)
-The `render.yaml` file is included for blueprint deployment:
+6. **Add Environment Variables:**
+   | Key | Value |
+   |-----|-------|
+   | `MONGO_URI` | `mongodb+srv://shivansh0962_db_user:cjJjhOkKMO8Q6Fbk@jansetu.eixgk6w.mongodb.net/jansetu_ai?retryWrites=true&w=majority&appName=jansetu` |
+   | `SECRET_KEY` | (generate random string) |
+   | `EMAIL_SENDER` | `teamletask@gmail.com` |
+   | `EMAIL_PASSWORD` | `vfhl lsnw hsxq hhrt` |
+   | `SMTP_SERVER` | `smtp.gmail.com` |
+   | `SMTP_PORT` | `587` |
+   | `FLASK_ENV` | `production` |
+
+7. Click **Deploy**
+
+### Alternative: Use Render Blueprint
+Upload `render.yaml` for automated setup:
 ```bash
-# In Render dashboard, select "Blueprint" and upload render.yaml
+# In Render dashboard → Blueprints → New Blueprint Instance
+# Upload the render.yaml file
 ```
+
+After deployment, your app will be at: `https://jansetu-ai.onrender.com`
 
 ---
 
