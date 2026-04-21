@@ -16,4 +16,5 @@ indic-transliteration
 langdetect
 dnspython
 certifi
-
+bcrypt
+gunicorn

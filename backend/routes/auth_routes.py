@@ -4,6 +4,7 @@ from database.schemas import create_user, create_worker, create_dept_officer
 import jwt
 import datetime
 from config import Config
+import bcrypt
 
 auth_bp = Blueprint('auth', __name__)
 
@@ -16,7 +17,9 @@ def register():
         return jsonify({'error': 'Missing required fields'}), 400
     
     email = data['email']
-    password = data['password'] # In real app, hash this!
+    password = data['password']
+    # Hash password using bcrypt
+    password_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
     role = data.get('role', 'Citizen') 
     
     # ===== PASSWORD FORMAT VALIDATION =====
@@ -45,8 +48,8 @@ def register():
         new_worker = create_worker(
             name=data.get('name', 'Worker'),
             email=email,
-            department_id=dept, # Pass 'department' value to 'department_id' field
-            password_hash=password, 
+            department_id=dept,
+            password_hash=password_hash,
             role='Worker'
         )
         result = db.workers.insert_one(new_worker)
@@ -59,7 +62,7 @@ def register():
             name=data.get('name', 'Dept Officer'),
             email=email,
             department_id=dept,
-            password_hash=password,
+            password_hash=password_hash,
             role='dept_officer'
         )
         result = db.dept_officers.insert_one(new_officer)
@@ -81,7 +84,7 @@ def register():
         new_admin = {
             "name": data.get('name', 'Official'),
             "email": email,
-            "password_hash": password,
+            "password_hash": password_hash,
             "role": role,
             "department": data.get('department', 'Administration'),
             "district": data.get('district', ''),
@@ -96,7 +99,7 @@ def register():
         new_user = create_user(
             name=data.get('name', 'Citizen'),
             email=email,
-            password_hash=password, # Store consistent field
+            password_hash=password_hash,
             role='Citizen'
         )
         result = db.users.insert_one(new_user)
@@ -174,38 +177,44 @@ def login():
              print(f"Search Admins Result: {user is not None}")
              
         # 4. Fallback Hardcoded Admin (Emergency Access for Demo)
-        if not user and email == 'admin@jansetu.ai' and password == 'admin123':
-            print("Using Fallback Admin")
-            user = {
-                '_id': 'admin_001',
-                'name': 'System Admin',
-                'email': 'admin@jansetu.ai',
-                'password': 'admin123',
-                'role': 'admin'
-            }
-            role = 'admin'
+        # These use pre-hashed passwords with bcrypt
+        admin_hash = '$2b$12$k31P8s0FApU5LSekMmMWA.fhKPy8/3FNM9cQ9Ba45FhEEe2UwNRvu'  # admin123
+        gov_hash = '$2b$12$G6HHCoECbuDCe73s1ubuGuJwBJbJTdxXB5ebZGhr/Ohqw1oFrYhW2'    # gov123
+        
+        if not user and email == 'admin@jansetu.ai':
+            # Verify hardcoded admin with bcrypt
+            if bcrypt.checkpw(password.encode('utf-8'), admin_hash.encode('utf-8')):
+                print("Using Fallback Admin")
+                user = {
+                    '_id': 'admin_001',
+                    'name': 'System Admin',
+                    'email': 'admin@jansetu.ai',
+                    'password_hash': admin_hash,
+                    'role': 'admin'
+                }
+                role = 'admin'
             
-        if not user and email == 'gov@jansetu.ai' and password == 'gov123':
-            print("Using Fallback Governance")
-            user = {
-                '_id': 'gov_001',
-                'name': 'Governance Head',
-                'email': 'gov@jansetu.ai',
-                'password': 'gov123',
-                'role': 'governance'
-            }
-            role = 'governance'
+        if not user and email == 'gov@jansetu.ai':
+            # Verify hardcoded governance with bcrypt
+            if bcrypt.checkpw(password.encode('utf-8'), gov_hash.encode('utf-8')):
+                print("Using Fallback Governance")
+                user = {
+                    '_id': 'gov_001',
+                    'name': 'Governance Head',
+                    'email': 'gov@jansetu.ai',
+                    'password_hash': gov_hash,
+                    'role': 'governance'
+                }
+                role = 'governance'
 
         
         if user:
-            # Check 'password_hash' primarily, fallback to 'password'
+            # Check password using bcrypt
             stored_hash = user.get('password_hash')
-            stored_pass = user.get('password')
             print(f"Stored Hash exists: {bool(stored_hash)}")
-            print(f"Stored Pass exists: {bool(stored_pass)}")
             
-            # Simple string comparison (for hackathon/demo)
-            if (stored_hash and stored_hash == password) or (stored_pass and stored_pass == password):
+            # Verify password with bcrypt
+            if stored_hash and bcrypt.checkpw(password.encode('utf-8'), stored_hash.encode('utf-8')):
                 print(f"Success: Password match for {email} ({role})")
 
                 # Enforce role-wise portal access:

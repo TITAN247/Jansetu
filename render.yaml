@@ -1,0 +1,32 @@
+# Render.com Deployment Configuration for JanSetu AI
+services:
+  # Backend API Service
+  - type: web
+    name: jansetu-api
+    env: python
+    buildCommand: cd backend && pip install -r requirements.txt
+    startCommand: cd backend && gunicorn app:app --bind 0.0.0.0:$PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.0
+      - key: MONGO_URI
+        sync: false  # Set this in Render dashboard
+      - key: SECRET_KEY
+        generateValue: true
+      - key: EMAIL_SENDER
+        sync: false
+      - key: EMAIL_PASSWORD
+        sync: false
+      - key: SMTP_SERVER
+        value: smtp.gmail.com
+      - key: SMTP_PORT
+        value: 587
+
+  # Frontend Static Site
+  - type: static
+    name: jansetu-web
+    buildCommand: cd frontend && npm install && npm run build
+    staticPublishPath: ./frontend/dist
+    envVars:
+      - key: VITE_API_URL
+        value: https://jansetu-api.onrender.com
